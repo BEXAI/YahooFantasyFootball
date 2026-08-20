@@ -16,6 +16,7 @@ fi
 
 M=$(date -v+3M +%M); H=$(date -v+3M +%H)
 
+mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,13 +24,14 @@ cat > "$PLIST" <<PLIST
   <key>Label</key><string>com.nathaniel.ffl.smoke</string>
   <key>ProgramArguments</key><array>
     <string>/bin/bash</string><string>-lc</string>
-    <string>cd $AGENT_DIR &amp;&amp; DRY_RUN=1 ./run.sh</string>
+    <string>cd '$AGENT_DIR' &amp;&amp; DRY_RUN=1 ./run.sh</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>$H</integer><key>Minute</key><integer>$M</integer></dict>
 </dict></plist>
 PLIST
 
+launchctl unload "$PLIST" 2>/dev/null || true    # re-run: drop any stale fire time
 launchctl load "$PLIST"
 echo "Smoke job scheduled for $H:$M. Now: plug into AC, CLOSE THE LID, wait 5 minutes."
 echo "Then open the lid and run:"

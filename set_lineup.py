@@ -138,7 +138,11 @@ def load_override():
         age_h = (time.time() - f.stat().st_mtime) / 3600
         if age_h > CFG["lineup_json_max_age_hours"]:
             return None
-        return data.get("swaps") or None            # [{"out": "...", "in": "..."}]
+        swaps = data.get("swaps")                   # [{"out": "...", "in": "..."}]
+        if (isinstance(swaps, list) and swaps
+                and all(isinstance(s, dict) for s in swaps)):
+            return swaps
+        return None                                 # wrong shape → optimizer fallback
     except Exception:
         return None
 
@@ -196,8 +200,21 @@ def enter_swap_mode(page):
 def execute(page, swaps):
     done, skipped = [], []
     enter_swap_mode(page)
+    dirty = False        # a failed swap can leave a dangling Swap Mode selection;
+                         # the next click would then EXECUTE an unplanned swap
     for (out_name, in_name, slot, gain) in swaps:
         try:
+            if dirty:
+                # hard reset of UI state: reload the page so no half-completed
+                # selection can turn our next click into an unverified write
+                page.goto(TEAM_URL, wait_until="domcontentloaded", timeout=45000)
+                enter_swap_mode(page)
+                dirty = False
+            # pre-check: the starter must still hold the slot we planned against
+            current = {p["name"]: p for p in parse_roster(page)}
+            if current.get(out_name, {}).get("slot") != slot:
+                skipped.append(f"{slot}: {out_name}→{in_name} (roster changed, pre-check)")
+                continue
             click_slot_control(page, out_name)       # select starter to replace
             page.wait_for_timeout(900)               # human-paced; highlights render
             click_slot_control(page, in_name)        # click highlighted bench player
@@ -209,10 +226,13 @@ def execute(page, swaps):
                 done.append(f"{slot}: {out_name} → {in_name} (+{gain})")
             else:
                 skipped.append(f"{slot}: {out_name}→{in_name} (verify failed)")
+                dirty = True
         except PWTimeout:
             skipped.append(f"{slot}: {out_name}→{in_name} (locked/timeout)")
+            dirty = True
         except Exception as e:
             skipped.append(f"{slot}: {out_name}→{in_name} ({type(e).__name__})")
+            dirty = True
     return done, skipped
 
 

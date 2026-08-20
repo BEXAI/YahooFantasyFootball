@@ -233,3 +233,18 @@ def test_override_empty_swaps_returns_none(tmp_path, monkeypatch):
     (tmp_path / "lineup.json").write_text(json.dumps({"swaps": []}))
     monkeypatch.setattr(sl, "ROOT", tmp_path)
     assert sl.load_override() is None
+
+
+def test_override_swaps_dict_instead_of_list_returns_none(tmp_path, monkeypatch):
+    # realistic phone-SSH typo: {"swaps": {"out": ..., "in": ...}} — must fall
+    # back to the optimizer instead of crashing main with AttributeError
+    (tmp_path / "lineup.json").write_text(
+        json.dumps({"swaps": {"out": "A", "in": "B"}}))
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_override() is None
+
+
+def test_override_swaps_list_of_strings_returns_none(tmp_path, monkeypatch):
+    (tmp_path / "lineup.json").write_text(json.dumps({"swaps": ["A,B"]}))
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_override() is None

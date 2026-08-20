@@ -58,7 +58,7 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 | `set_lineup.py` | Main agent: read → decide → write → verify → notify |
 | `run.sh` | launchd entrypoint: sentinel + caffeinate + healthchecks ping |
 | `install.sh` | Phase 0: venv + Playwright Chromium + config bootstrap |
-| `arm.sh` | Phase 4: `pmset disablesleep` + install launchd schedules |
+| `arm.sh` | Phase 4: `pmset disablesleep` + install launchd schedules (rewritten to this clone's path) |
 | `smoke_test.sh` | Phase 4: lid-closed smoke test (temp DRY job 3 min out) |
 | `teardown.sh` | Season teardown / full revert |
 | `launchd/*.plist` | Thu 17:30 & Sun 10:30 LaunchAgents |
@@ -68,9 +68,12 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 | `logs/`, `screenshots/` | Run logs, `last_status.json`, before/after PNGs (gitignored) |
 | `PAUSED` | Touch this file to disable writes instantly (absent by default) |
 
-> The launchd plists assume the project lives at `~/ffl-agent`. Clone accordingly:
+> The committed plists reference `~/ffl-agent` (the plan's convention), but `arm.sh`
+> rewrites them to wherever this clone actually lives when it installs them into
+> `~/Library/LaunchAgents/` — so the armed schedules always run the same path the
+> smoke test validated, regardless of where you cloned. `~/ffl-agent` remains the
+> recommended location:
 > `git clone https://github.com/BEXAI/YahooFantassyFootball ~/ffl-agent`
-> (or edit the two plists if you keep it elsewhere).
 
 ## Phase 0 — Prerequisites & power hygiene
 
