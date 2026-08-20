@@ -322,18 +322,20 @@ def _two_player_roster():
 
 
 def test_override_swaps_match_via_normalization():
-    swaps = sl.build_override_swaps(
+    swaps, skipped = sl.build_override_swaps(
         _two_player_roster(), [{"out": "D.J. Moore", "in": "bench receiver"}])
     assert swaps == [("DJ Moore", "Bench Receiver", "WR", 4.0)]
+    assert skipped == []
 
 
 def test_override_swaps_dedup_repeated_player():
     roster = _two_player_roster() + [P("Other WR", "WR", primary="WR", proj=5.0)]
-    swaps = sl.build_override_swaps(roster, [
+    swaps, skipped = sl.build_override_swaps(roster, [
         {"out": "DJ Moore", "in": "Bench Receiver"},
         {"out": "Other WR", "in": "Bench Receiver"},     # reuse → must be dropped
     ])
     assert len(swaps) == 1
+    assert skipped and "already used" in skipped[0]
 
 
 def test_override_swaps_reject_unstartable_locked_ineligible():
@@ -344,18 +346,30 @@ def test_override_swaps_reject_unstartable_locked_ineligible():
         P("Bench QB", "BN", primary="QB", proj=25.0),
     ]
     for bad in ("Out Bench", "Locked Bench", "Bench QB"):
-        assert sl.build_override_swaps(roster, [{"out": "Starter WR", "in": bad}]) == []
+        swaps, skipped = sl.build_override_swaps(roster, [{"out": "Starter WR", "in": bad}])
+        assert swaps == [] and len(skipped) == 1
 
 
-def test_override_swaps_unknown_names_skipped():
-    assert sl.build_override_swaps(
-        _two_player_roster(), [{"out": "Nobody", "in": "Bench Receiver"}]) == []
+def test_override_swaps_unknown_names_skipped_and_reported():
+    swaps, skipped = sl.build_override_swaps(
+        _two_player_roster(), [{"out": "Nobody", "in": "Bench Receiver"}])
+    assert swaps == []
+    assert skipped == ["Nobody→Bench Receiver (no unique roster match)"]
 
 
 def test_override_swaps_self_swap_rejected():
     # out and in resolving to the same player must never produce a "swap"
-    assert sl.build_override_swaps(
-        _two_player_roster(), [{"out": "DJ Moore", "in": "D.J. Moore"}]) == []
+    swaps, skipped = sl.build_override_swaps(
+        _two_player_roster(), [{"out": "DJ Moore", "in": "D.J. Moore"}])
+    assert swaps == [] and "self-swap" in skipped[0]
+
+
+def test_override_swaps_non_string_names_skip_not_crash():
+    # LLM-generated advice can carry wrong types — must degrade, never raise
+    swaps, skipped = sl.build_override_swaps(
+        _two_player_roster(),
+        [{"out": 42, "in": "Bench Receiver"}, {"out": ["DJ Moore"], "in": {"x": 1}}])
+    assert swaps == [] and len(skipped) == 2
 
 
 # ---------- decide (priority chain) ----------
@@ -374,7 +388,7 @@ def test_decide_manual_beats_advice_and_optimizer(tmp_path, monkeypatch):
         json.dumps({"swaps": [{"out": "Weak Starter", "in": "Other Bench"}]}))
     _write_advice(tmp_path, _iso(1), swaps=[{"out": "Weak Starter", "in": "Strong Bench"}])
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    swaps, source = sl.decide(_chain_roster())
+    swaps, source, osk = sl.decide(_chain_roster())
     assert source == "manual"
     assert swaps == [("Weak Starter", "Other Bench", "WR", 2.0)]
 
@@ -383,14 +397,15 @@ def test_decide_manual_authoritative_even_when_nothing_validates(tmp_path, monke
     (tmp_path / "lineup.json").write_text(
         json.dumps({"swaps": [{"out": "Typo Name", "in": "Also Wrong"}]}))
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    swaps, source = sl.decide(_chain_roster())
-    assert (swaps, source) == ([], "manual")     # human chose it; optimizer must not churn
+    swaps, source, osk = sl.decide(_chain_roster())
+    assert (swaps, source) == ([], "manual")
+    assert len(osk) == 1     # human chose it; optimizer must not churn
 
 
 def test_decide_advice_used_when_no_manual(tmp_path, monkeypatch):
     _write_advice(tmp_path, _iso(1), swaps=[{"out": "Weak Starter", "in": "Strong Bench"}])
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    swaps, source = sl.decide(_chain_roster())
+    swaps, source, osk = sl.decide(_chain_roster())
     assert source == "advice"
     assert swaps == [("Weak Starter", "Strong Bench", "WR", 5.0)]
 
@@ -399,7 +414,7 @@ def test_decide_garbage_advice_falls_back_to_optimizer(tmp_path, monkeypatch):
     # fresh advice whose entries ALL fail validation = hallucinated research
     _write_advice(tmp_path, _iso(1), swaps=[{"out": "Hallucinated", "in": "Not Real"}])
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    swaps, source = sl.decide(_chain_roster())
+    swaps, source, osk = sl.decide(_chain_roster())
     assert source == "optimizer"
     assert swaps == [("Weak Starter", "Strong Bench", "WR", 5.0)]
 
@@ -408,12 +423,12 @@ def test_decide_stale_advice_falls_back_to_optimizer(tmp_path, monkeypatch):
     _write_advice(tmp_path, _iso(sl.CFG.get("advice_max_age_hours", 6) + 1),
                   swaps=[{"out": "Weak Starter", "in": "Strong Bench"}])
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    swaps, source = sl.decide(_chain_roster())
+    swaps, source, osk = sl.decide(_chain_roster())
     assert source == "optimizer"
 
 
 def test_decide_nothing_present_runs_optimizer(tmp_path, monkeypatch):
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    swaps, source = sl.decide(_chain_roster())
+    swaps, source, osk = sl.decide(_chain_roster())
     assert source == "optimizer"
     assert swaps == [("Weak Starter", "Strong Bench", "WR", 5.0)]

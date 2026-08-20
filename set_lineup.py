@@ -193,8 +193,12 @@ _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
 def norm_name(s):
-    """Match names across renderings: 'D.J. Moore' == 'DJ Moore', drop Jr/III etc."""
-    s = re.sub(r"[^a-z0-9 ]", "", (s or "").casefold())
+    """Match names across renderings: 'D.J. Moore' == 'DJ Moore', drop Jr/III etc.
+    Total over any input: a non-string (LLM-generated advice can carry wrong
+    types) normalizes to "" and simply never matches — it must not crash."""
+    if not isinstance(s, str):
+        return ""
+    s = re.sub(r"[^a-z0-9 ]", "", s.casefold())
     return " ".join(p for p in s.split() if p not in _SUFFIXES)
 
 
@@ -211,33 +215,49 @@ def roster_index(roster):
 def build_override_swaps(roster, entries):
     """Validate override entries (manual or advice) against the parsed roster.
     Same guardrails as the optimizer: startable, unlocked, slot-eligible, and
-    each player in at most one swap."""
+    each player in at most one swap. Returns (swaps, skipped): rejected entries
+    are reported with a reason, never silently dropped."""
     idx = roster_index(roster)
-    swaps, used = [], set()
+    swaps, used, skipped = [], set(), []
     for s in entries or []:
-        st, bn = idx.get(norm_name(s.get("out"))), idx.get(norm_name(s.get("in")))
-        if (st and bn and st is not bn
-                and st["name"] not in used and bn["name"] not in used
-                and startable(bn) and not bn["locked"] and eligible(bn, st["slot"])):
+        out_raw, in_raw = s.get("out"), s.get("in")
+        label = f"{out_raw}→{in_raw}"
+        st, bn = idx.get(norm_name(out_raw)), idx.get(norm_name(in_raw))
+        if st is None or bn is None:
+            skipped.append(f"{label} (no unique roster match)")
+        elif st is bn:
+            skipped.append(f"{label} (self-swap)")
+        elif st["name"] in used or bn["name"] in used:
+            skipped.append(f"{label} (player already used)")
+        elif not startable(bn):
+            skipped.append(f"{label} (not startable)")
+        elif bn["locked"]:
+            skipped.append(f"{label} (locked)")
+        elif not eligible(bn, st["slot"]):
+            skipped.append(f"{label} (ineligible for {st['slot']})")
+        else:
             swaps.append((st["name"], bn["name"], st["slot"],
                           round(bn["proj"] - st["proj"], 1)))
             used.update((st["name"], bn["name"]))
-    return swaps
+    return swaps, skipped
 
 
 def decide(roster):
     """Decision chain: manual override > fresh advice > optimizer.
     Manual is authoritative even when nothing validates (the human chose it);
-    advice with ZERO validated entries is treated as garbage and falls back."""
+    advice with ZERO validated entries is treated as garbage and falls back.
+    Returns (swaps, source, override_skipped)."""
     manual = load_manual_override()
     if manual is not None:
-        return build_override_swaps(roster, manual), "manual"
+        swaps, skipped = build_override_swaps(roster, manual)
+        return swaps, "manual", skipped
+    adv_skipped = []
     advice = load_advice()
     if advice:
-        swaps = build_override_swaps(roster, advice)
+        swaps, adv_skipped = build_override_swaps(roster, advice)
         if swaps:
-            return swaps, "advice"
-    return plan_swaps(roster), "optimizer"
+            return swaps, "advice", adv_skipped
+    return plan_swaps(roster), "optimizer", adv_skipped
 
 
 def plan_swaps(roster):
@@ -345,20 +365,22 @@ def main():
         page.screenshot(path=str(ROOT / "screenshots" / f"before_{TS}.png"), full_page=True)
 
         roster = parse_roster(page)
-        swaps, source = decide(roster)
+        swaps, source, osk = decide(roster)
+        osk_txt = f" | override skipped: {'; '.join(osk)}" if osk else ""
+        extra = {"source": source, **({"override_skipped": osk} if osk else {})}
 
         if not swaps:
             page.screenshot(path=str(ROOT / "screenshots" / f"after_{TS}.png"), full_page=True)
             ctx.close()
-            finish("NO_CHANGE", {"summary": f"lineup already optimal ({source})",
-                                 "source": source}, 0)
+            finish("NO_CHANGE", {"summary": f"lineup already optimal ({source}){osk_txt}",
+                                 **extra}, 0)
 
         plan_txt = "; ".join(f"{s[2]}: {s[0]}→{s[1]} (+{s[3]})" for s in swaps)
         if DRY_RUN or PAUSED:
             tag = "DRY" if DRY_RUN else "PAUSED"
             ctx.close()
-            finish("NO_CHANGE", {"summary": f"[{tag}] planned: {plan_txt}",
-                                 "planned": plan_txt, "source": source}, 0)
+            finish("NO_CHANGE", {"summary": f"[{tag}] planned: {plan_txt}{osk_txt}",
+                                 "planned": plan_txt, **extra}, 0)
 
         done, skipped = execute(page, swaps)
         try:
@@ -374,13 +396,13 @@ def main():
             print(f"[ctx-close-fail] {e}", file=sys.stderr)
 
     if done and not skipped:
-        finish("SUCCESS", {"summary": "; ".join(done), "source": source}, 0)
+        finish("SUCCESS", {"summary": f"{'; '.join(done)}{osk_txt}", **extra}, 0)
     elif done:
-        finish("PARTIAL", {"summary": f"done: {'; '.join(done)} | skipped: {'; '.join(skipped)}",
-                           "source": source}, 0)
+        finish("PARTIAL", {"summary": f"done: {'; '.join(done)} | skipped: "
+                                      f"{'; '.join(skipped)}{osk_txt}", **extra}, 0)
     else:
-        finish("PARTIAL", {"summary": f"no swaps applied | skipped: {'; '.join(skipped)}",
-                           "source": source}, 3)
+        finish("PARTIAL", {"summary": f"no swaps applied | skipped: "
+                                      f"{'; '.join(skipped)}{osk_txt}", **extra}, 3)
 
 
 if __name__ == "__main__":

@@ -65,7 +65,7 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 | `league_settings.json` | Slots/eligibility/scoring for the Routines (`config.json` is gitignored so the cloud can't read it; keep the two eligibility maps in sync). |
 | `advice/` | Routine-committed `lineup.json` + `history/` rationale archive — the data channel and season memory (see §1.5b). |
 | `docs/ROUTINE_PROMPT.md` | Versioned operating instructions the research Routines follow; `docs/ENHANCEMENT_PLAN.md` holds the design rationale. |
-| `tests/` | 56 browser-free unit tests over the decision logic; run by CI (`.github/workflows/tests.yml`). |
+| `tests/` | Browser-free unit tests over the decision logic; run by CI (`.github/workflows/tests.yml`). |
 
 ### 1.3 Data files and their schemas
 
@@ -87,7 +87,7 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 - **`lineup.json`** (gitignored, human-written via SSH; format in `lineup.sample.json`): `{"swaps": [{"out": "...", "in": "..."}]}`. Fresh by file mtime (< `lineup_json_max_age_hours`, default 20) → **authoritative**: the optimizer does not run, even if no entry validates — it can't churn a lineup you set deliberately.
 - **`advice/lineup.json`** (tracked, committed by the research Routines; extracted by `run.sh` into gitignored `advice_remote.json`): same `swaps` shape plus a required `generated_at` ISO-8601 timestamp. Freshness comes from `generated_at` (< `advice_max_age_hours`, default 6) — never mtime, which git extraction resets. Fresh advice whose entries **all** fail validation is treated as garbage research and the optimizer runs instead.
 
-Priority: manual `lineup.json` > fresh advice > optimizer. `last_status.json` reports which source ran as `source: manual|advice|optimizer`.
+Priority: manual `lineup.json` > fresh advice > optimizer. `last_status.json` reports which source ran as `source: manual|advice|optimizer`, and any rejected override entries appear with a reason under `override_skipped` and in the ntfy summary — a discarded recommendation is never silently dropped.
 
 **`logs/last_status.json`** (written by every run):
 

@@ -54,6 +54,15 @@ two independent sources reporting expected inactivity. One rumor is not a decisi
 
 ## Decision rules
 
+- **You do not know the current slot assignments** — `roster.json` lists who is on
+  the team, not who starts. The executor swaps `out` (a player it finds in a
+  starting slot at run time) with `in` (a player it finds on the bench). Frame
+  every recommendation as "start IN over OUT": choose `out` as the player your
+  research says is the likely current starter at that position, and prefer
+  same-primary-position pairs (WR-for-WR, RB-for-RB) — they survive slot
+  uncertainty best. An entry whose `out` player turns out not to be a current
+  starter (or `in` not on the bench) is dropped harmlessly by the executor and
+  reported in its run status; its optimizer covers the gap.
 - Only swaps that improve on the roster's likely output; respect
   `league_settings.json` eligibility exactly (a QB never goes to W/R/T unless the
   league has a superflex slot listed there).

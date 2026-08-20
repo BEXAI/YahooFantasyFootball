@@ -1,9 +1,11 @@
-# Runtime state — never commit
+# Runtime state — never commit. Patterns are ROOT-ANCHORED (leading /):
+# an unanchored "lineup.json" would also ignore the TRACKED advice/lineup.json
+# and silently kill the research-layer data channel.
 profile/
 PAUSED
-lineup.json
-config.json
-advice_remote.json
+/lineup.json
+/config.json
+/advice_remote.json
 
 # Generated artifacts
 logs/*
