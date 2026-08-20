@@ -5,8 +5,9 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TS=$(date +%Y%m%dT%H%M%S)
 mkdir -p logs screenshots
 LOG="logs/run_$TS.log"
-HC=$(python3 -c 'import json;print(json.load(open("config.json"))["healthchecks_url"])')
-TOPIC=$(python3 -c 'import json;print(json.load(open("config.json"))["ntfy_topic"])')
+# one python process for both values (was two identical parses of config.json)
+{ read -r HC; read -r TOPIC; } < <(python3 -c \
+  'import json;c=json.load(open("config.json"));print(c["healthchecks_url"]);print(c["ntfy_topic"])') || { HC=""; TOPIC=""; }
 
 # Sentinel: if the sleep flag got reset (macOS update/reboot), this run only
 # happened because the lid is open — warn so you re-arm before the next one.

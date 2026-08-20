@@ -14,7 +14,9 @@ if [ "${1:-}" = "--cleanup" ]; then
   exit 0
 fi
 
-M=$(date -v+3M +%M); H=$(date -v+3M +%H)
+# single date call: two separate calls could straddle a minute/hour boundary
+# and schedule the job an hour off (H from one time, M from another)
+read -r H M < <(date -v+3M "+%H %M")
 
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PLIST

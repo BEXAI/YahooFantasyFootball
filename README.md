@@ -29,8 +29,9 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 │         │
 │         └─ run.sh
 │              ├─ sentinel: SleepDisabled==1 ? (warn via ntfy if not)
-│              ├─ PAUSED file present ? → exit 0, no writes
 │              ├─ caffeinate -i  .venv/bin/python set_lineup.py
+│              │     ├─ 0 PAUSED file present ? → report planned swaps
+│              │     │            only ([PAUSED]), zero writes, exit 0
 │              │     ├─ 1 READ    headless persistent Chromium (./profile)
 │              │     │            login-guard → abort+notify if sign-in page
 │              │     │            parse roster: slot, player, status, bye,
@@ -168,7 +169,8 @@ cat logs/last_status.json            # DRY status generated lid-closed = PASS
 | Yahoo DOM redesign | Parse returns 0 players → `ERROR` exit 4; or verify-fail `PARTIAL` | Re-pin the 3 DOM-contract selectors (Phase 2 procedure) |
 | Power outage → battery drained → Mac off | Missed ping → healthchecks alert | Manual power-on + login (Apple Silicon can't auto-boot); battery rides out short outages |
 | Critical battery force-sleep | Same dead-man alert | Confirm AC connection/adapter |
-| `lineup.json` stale/typo'd names | Ignored by freshness check / unmatched names skipped | Optimizer fallback ran; fix file if intended |
+| `lineup.json` stale or malformed | Ignored (freshness / shape check) → optimizer fallback ran | Fix or delete the file if you wanted the override |
+| `lineup.json` fresh but names typo'd | Unmatched entries skipped → `NO_CHANGE (lineup.json)`. A fresh override is authoritative: the optimizer does **not** run, so it can't churn a lineup you set deliberately | Fix the names (or delete the file to re-enable the optimizer) |
 
 ## Ops notes & revert
 

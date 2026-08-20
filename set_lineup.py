@@ -91,17 +91,21 @@ def parse_roster(page):
         slot = next((c for c in cells if STARTER_SLOTS_RE.match(c) or c in ("BN", "IR")), None)
         if not slot:
             continue
+        # match status/lock/position against row text WITHOUT the player's name:
+        # names like "Aidan O'Connell" match \bO\b (→ falsely OUT) and
+        # "Drew Lock" matches \block (→ falsely locked) otherwise
+        meta = " ".join(txt.replace(name, " ").split())
         status = next((s for s in ("IR", "SUSP", "PUP", "NFI", "NA", "O", "D", "Q")
-                       if re.search(rf"\b{s}\b", txt)), "")
-        bye = bool(re.search(r"\bBye\b", txt, re.I))
+                       if re.search(rf"\b{s}\b", meta)), "")
+        bye = bool(re.search(r"\bBye\b", meta, re.I))
         proj = 0.0
         nums = [parse_float(c) for c in cells if re.fullmatch(r"-?\d+(\.\d+)?", c or "")]
         if nums:
             proj = nums[0]                          # Phase 2: pin exact proj column index
-        locked = bool(re.search(r"\block", txt, re.I)) or "disabled" in (
+        locked = bool(re.search(r"\block", meta, re.I)) or "disabled" in (
             row.locator("td").first.get_attribute("class") or "")
         # primary position = first eligibility key found in row text
-        primary = next((p for p in CFG["slot_eligibility"] if re.search(rf"\b{p}\b", txt)), None)
+        primary = next((p for p in CFG["slot_eligibility"] if re.search(rf"\b{p}\b", meta)), None)
         players.append({"name": name, "slot": slot, "primary": primary,
                         "status": status, "bye": bye, "proj": proj, "locked": locked})
     if not players:
@@ -218,7 +222,11 @@ def execute(page, swaps):
             click_slot_control(page, out_name)       # select starter to replace
             page.wait_for_timeout(900)               # human-paced; highlights render
             click_slot_control(page, in_name)        # click highlighted bench player
-            page.wait_for_load_state("networkidle", timeout=15000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except PWTimeout:
+                pass    # busy pages may never go idle; both clicks already fired,
+                        # so the verify re-parse below is the authoritative check
             page.wait_for_timeout(900)
             # verify-then-continue: re-parse and confirm in_name now holds a starter slot
             fresh = {p["name"]: p for p in parse_roster(page)}
@@ -250,12 +258,17 @@ def main():
         roster = parse_roster(page)
         override = load_override()
         if override:
-            swaps = []
+            swaps, used = [], set()
             by_name = {p["name"]: p for p in roster}
             for s in override:
                 st, bn = by_name.get(s.get("out")), by_name.get(s.get("in"))
-                if st and bn and startable(bn) and not bn["locked"] and eligible(bn, st["slot"]):
+                # `used` guard: a name repeated across override entries would make
+                # the second entry click a player who already moved — an unplanned,
+                # unverifiable write. Each player may appear in at most one swap.
+                if (st and bn and st["name"] not in used and bn["name"] not in used
+                        and startable(bn) and not bn["locked"] and eligible(bn, st["slot"])):
                     swaps.append((st["name"], bn["name"], st["slot"], round(bn["proj"]-st["proj"],1)))
+                    used.update((st["name"], bn["name"]))
             source = "lineup.json"
         else:
             swaps = plan_swaps(roster)
@@ -269,14 +282,23 @@ def main():
 
         plan_txt = "; ".join(f"{s[2]}: {s[0]}→{s[1]} (+{s[3]})" for s in swaps)
         if DRY_RUN or PAUSED:
+            tag = "DRY" if DRY_RUN else "PAUSED"
             ctx.close()
-            finish("NO_CHANGE", {"summary": f"[DRY] planned: {plan_txt}",
+            finish("NO_CHANGE", {"summary": f"[{tag}] planned: {plan_txt}",
                                  "planned": plan_txt, "source": source}, 0)
 
         done, skipped = execute(page, swaps)
-        page.goto(TEAM_URL, wait_until="domcontentloaded")
-        page.screenshot(path=str(ROOT / "screenshots" / f"after_{TS}.png"), full_page=True)
-        ctx.close()
+        try:
+            # best-effort evidence: never let a nav/screenshot failure crash us
+            # AFTER live writes — the finish() report below must still happen
+            page.goto(TEAM_URL, wait_until="domcontentloaded", timeout=45000)
+            page.screenshot(path=str(ROOT / "screenshots" / f"after_{TS}.png"), full_page=True)
+        except Exception as e:
+            print(f"[after-screenshot-fail] {e}", file=sys.stderr)
+        try:
+            ctx.close()
+        except Exception as e:
+            print(f"[ctx-close-fail] {e}", file=sys.stderr)
 
     if done and not skipped:
         finish("SUCCESS", {"summary": "; ".join(done), "source": source}, 0)
