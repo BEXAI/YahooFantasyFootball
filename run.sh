@@ -13,7 +13,9 @@ LOG="logs/run_$TS.log"
 # (git show never touches the working tree state). Offline => keep the previous
 # extract; its embedded generated_at freshness check governs. If fetch works but
 # the file is gone from main, drop the stale local copy.
-if git fetch origin main >/dev/null 2>&1; then
+# GIT_TERMINAL_PROMPT=0: under launchd there is no TTY — a private repo with a
+# missing credential must fail fast here, never sit on a prompt into lock time.
+if GIT_TERMINAL_PROMPT=0 git fetch origin main >/dev/null 2>&1; then
   git show FETCH_HEAD:advice/lineup.json > advice_remote.json 2>/dev/null \
     || rm -f advice_remote.json
 fi

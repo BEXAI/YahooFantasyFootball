@@ -291,6 +291,14 @@ def test_advice_naive_timestamp_treated_as_utc(tmp_path, monkeypatch):
     assert sl.load_advice() == [{"out": "A", "in": "B"}]
 
 
+def test_advice_future_timestamp_rejected(tmp_path, monkeypatch):
+    # a hallucinated future generated_at must not make advice permanently
+    # "fresh" — that would defeat the freshness mechanism entirely
+    _write_advice(tmp_path, _iso(-24 * 30))          # 30 days in the future
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_advice() is None
+
+
 @pytest.mark.parametrize("generated_at", [None, "not-a-date", 12345])
 def test_advice_bad_timestamp_ignored(tmp_path, monkeypatch, generated_at):
     (tmp_path / "advice_remote.json").write_text(
@@ -348,6 +356,20 @@ def test_override_swaps_reject_unstartable_locked_ineligible():
     for bad in ("Out Bench", "Locked Bench", "Bench QB"):
         swaps, skipped = sl.build_override_swaps(roster, [{"out": "Starter WR", "in": bad}])
         assert swaps == [] and len(skipped) == 1
+
+
+def test_override_swaps_swap_in_must_come_from_bench():
+    # a healthy player parked in an IR slot (or another starter) is a valid
+    # roster match but NOT a valid swap-in — the contract is starter ↔ bench
+    roster = [
+        P("Starter WR", "WR", primary="WR", proj=8.0),
+        P("Healthy IR Guy", "IR", primary="WR", proj=15.0),   # status "", startable
+        P("Other Starter", "WR", primary="WR", proj=9.0),
+    ]
+    for not_bench in ("Healthy IR Guy", "Other Starter"):
+        swaps, skipped = sl.build_override_swaps(
+            roster, [{"out": "Starter WR", "in": not_bench}])
+        assert swaps == [] and "not on bench" in skipped[0]
 
 
 def test_override_swaps_unknown_names_skipped_and_reported():

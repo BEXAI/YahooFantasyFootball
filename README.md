@@ -84,7 +84,7 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 
 **Override sources** — the DECIDE stage consumes two override files through one validation path (normalized name matching, startable/unlocked/eligible checks, each player in at most one swap), with different trust levels:
 
-- **`lineup.json`** (gitignored, human-written via SSH; format in `lineup.sample.json`): `{"swaps": [{"out": "...", "in": "..."}]}`. Fresh by file mtime (< `lineup_json_max_age_hours`, default 20) → **authoritative**: the optimizer does not run, even if no entry validates — it can't churn a lineup you set deliberately.
+- **`lineup.json`** (gitignored, human-written via SSH; format in `lineup.sample.json`): `{"swaps": [{"out": "...", "in": "..."}]}`. Fresh by file mtime (< `lineup_json_max_age_hours`, default 20) and containing at least one entry → **authoritative**: the optimizer does not run, even if no entry validates — it can't churn a lineup you set deliberately. Note `{"swaps": []}` counts as *no override* (the optimizer runs); to freeze the lineup entirely, use `touch PAUSED`, not an empty swaps file.
 - **`advice/lineup.json`** (tracked, committed by the research Routines; extracted by `run.sh` into gitignored `advice_remote.json`): same `swaps` shape plus a required `generated_at` ISO-8601 timestamp. Freshness comes from `generated_at` (< `advice_max_age_hours`, default 6) — never mtime, which git extraction resets. Fresh advice whose entries **all** fail validation is treated as garbage research and the optimizer runs instead.
 
 Priority: manual `lineup.json` > fresh advice > optimizer. `last_status.json` reports which source ran as `source: manual|advice|optimizer`, and any rejected override entries appear with a reason under `override_skipped` and in the ntfy summary — a discarded recommendation is never silently dropped.
@@ -227,7 +227,7 @@ The two Routines (Thu 20:00 / Sun 13:00 UTC) and all executor plumbing ship with
 
 1. Edit `roster.json` on `main`: replace every `Placeholder` entry with your actual roster, names **exactly** as Yahoo renders them. (Until then, Routines run harmless SMOKE MODE pushes.)
 2. Edit `league_settings.json` to match your league's slots, eligibility, and scoring — keep `slot_eligibility` identical to your Mac's `config.json`.
-3. On the Mac: `git pull` so `run.sh` gains the advice-fetch step, then `DRY_RUN=1 .venv/bin/python set_lineup.py` — `last_status.json` should show `source: advice` when fresh advice exists.
+3. On the Mac: `git pull` so `run.sh` gains the advice-fetch step, then `DRY_RUN=1 ./run.sh` — the fetch/extract step lives in `run.sh` (calling `set_lineup.py` directly skips it), and `last_status.json` should show `source: advice` when fresh advice exists.
 4. Decide repo visibility (§1.5b note): private hides your planned lineup from league-mates but requires a read credential on the Mac.
 5. Update `roster.json` after every add/drop — advice naming dropped players simply fails validation and the optimizer covers the gap.
 

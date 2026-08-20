@@ -158,10 +158,11 @@ def _valid_swap_list(data):
 def load_manual_override():
     """Human-written lineup.json (SSH). Fresh (mtime) => AUTHORITATIVE."""
     f = ROOT / "lineup.json"
-    if not f.exists():
+    try:
+        age_h = (time.time() - f.stat().st_mtime) / 3600
+    except OSError:                 # missing, or deleted between runs — no override
         return None
-    age_h = (time.time() - f.stat().st_mtime) / 3600
-    if age_h > CFG["lineup_json_max_age_hours"]:
+    if age_h > CFG.get("lineup_json_max_age_hours", 20):
         return None
     return _valid_swap_list(_read_json(f))
 
@@ -184,7 +185,10 @@ def load_advice():
     if gen.tzinfo is None:
         gen = gen.replace(tzinfo=datetime.timezone.utc)
     age_h = (datetime.datetime.now(datetime.timezone.utc) - gen).total_seconds() / 3600
-    if age_h > CFG.get("advice_max_age_hours", 6):
+    # Reject future timestamps too (beyond 1h clock-skew tolerance): a wrong
+    # future generated_at would otherwise stay "fresh" for weeks and defeat
+    # the entire freshness mechanism (Thursday's advice running every run).
+    if age_h < -1 or age_h > CFG.get("advice_max_age_hours", 6):
         return None
     return _valid_swap_list(data)
 
@@ -229,6 +233,11 @@ def build_override_swaps(roster, entries):
             skipped.append(f"{label} (self-swap)")
         elif st["name"] in used or bn["name"] in used:
             skipped.append(f"{label} (player already used)")
+        elif bn["slot"] != "BN":
+            # contract (README §1.3, ROUTINE_PROMPT): 'in' must come from the
+            # bench — a starter or IR-slot player here would make execute()
+            # click an unplanned, unverifiable UI interaction
+            skipped.append(f"{label} (swap-in not on bench)")
         elif not startable(bn):
             skipped.append(f"{label} (not startable)")
         elif bn["locked"]:
