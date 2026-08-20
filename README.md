@@ -57,7 +57,7 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 | Component | What it does |
 |---|---|
 | `launchd/*.plist` | Two LaunchAgents fire `run.sh` Thu 17:30 and Sun 10:30 (Mac local clock). Committed copies reference `~/ffl-agent`; `arm.sh` rewrites them to the clone's real path at install time. |
-| `run.sh` | Entrypoint: reads config, warns via ntfy if `SleepDisabled` got reset, runs the agent under `caffeinate -i`, pings healthchecks (`…/fail` on nonzero exit), rotates logs (keep 30) and screenshots (keep 40). |
+| `run.sh` | Entrypoint: extracts the latest committed advice (`git fetch` + `git show`, merge-free, `GIT_TERMINAL_PROMPT=0` so a missing credential fails fast instead of hanging), warns via ntfy if `SleepDisabled` got reset, runs the agent under `caffeinate -i`, pings healthchecks (`…/fail` on nonzero exit), rotates logs (keep 30) and screenshots (keep 40). |
 | `set_lineup.py` | The agent — the five stages in the diagram. Everything below (§1.3–§1.6) is its contract. |
 | `seed_login.py` | One-time, lid-open, **headed** login that seeds `./profile` (persistent Chromium cookies). The agent never touches credentials — it only reuses this profile. |
 | `install.sh` / `arm.sh` / `smoke_test.sh` / `teardown.sh` | Setup, arming, lid-closed smoke test, and full revert — used in §2. |
@@ -82,10 +82,10 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 | `slot_eligibility` | Map of **primary position → slots that position may fill**, e.g. `"RB": ["RB", "W/R/T"]`. Adjust for your league's flex types (superflex: add `"Q/W/R/T"` entries) |
 | `bad_statuses` | Statuses that are never startable: `["O","IR","SUSP","NA","PUP","NFI"]` (`Q` and `D` remain startable) |
 
-**Override sources** — the DECIDE stage consumes two override files through one validation path (normalized name matching, startable/unlocked/eligible checks, each player in at most one swap), with different trust levels:
+**Override sources** — the DECIDE stage consumes two override files through one validation path (normalized name matching, startable/unlocked/eligible checks, swap-in must currently be on the bench, each player in at most one swap), with different trust levels:
 
 - **`lineup.json`** (gitignored, human-written via SSH; format in `lineup.sample.json`): `{"swaps": [{"out": "...", "in": "..."}]}`. Fresh by file mtime (< `lineup_json_max_age_hours`, default 20) and containing at least one entry → **authoritative**: the optimizer does not run, even if no entry validates — it can't churn a lineup you set deliberately. Note `{"swaps": []}` counts as *no override* (the optimizer runs); to freeze the lineup entirely, use `touch PAUSED`, not an empty swaps file.
-- **`advice/lineup.json`** (tracked, committed by the research Routines; extracted by `run.sh` into gitignored `advice_remote.json`): same `swaps` shape plus a required `generated_at` ISO-8601 timestamp. Freshness comes from `generated_at` (< `advice_max_age_hours`, default 6) — never mtime, which git extraction resets. Fresh advice whose entries **all** fail validation is treated as garbage research and the optimizer runs instead.
+- **`advice/lineup.json`** (tracked, committed by the research Routines; extracted by `run.sh` into gitignored `advice_remote.json`): same `swaps` shape plus a required `generated_at` ISO-8601 timestamp. Freshness comes from `generated_at` (< `advice_max_age_hours`, default 6) — never mtime, which git extraction resets — and future-dated timestamps beyond a 1-hour clock-skew tolerance are rejected too (a wrong future date would otherwise stay "fresh" for weeks). Fresh advice whose entries **all** fail validation is treated as garbage research and the optimizer runs instead.
 
 Priority: manual `lineup.json` > fresh advice > optimizer. `last_status.json` reports which source ran as `source: manual|advice|optimizer`, and any rejected override entries appear with a reason under `override_skipped` and in the ntfy summary — a discarded recommendation is never silently dropped.
 
@@ -119,7 +119,7 @@ Writes use Yahoo's **Swap Mode**: click the starter's slot control, then click t
 
 ### 1.5b The research layer (Claude Code Routines)
 
-Two scheduled Routines fire fresh cloud sessions in this repo's environment — **Thu 20:00 UTC and Sun 13:00 UTC**, chosen so they land 1.5–2.5h before the Mac runs on both sides of the November DST change. Each session follows `docs/ROUTINE_PROMPT.md`: read `roster.json` + `league_settings.json` + recent `advice/history/`, research the slate (injuries, confirmed inactives, weather, Vegas context, expert consensus, kickoff locks), then commit `advice/lineup.json` and a rationale file to `main` and end with a summary that arrives as a push notification — opening the human **veto window** before the Mac run (do nothing → advice executes; `touch PAUSED` → nothing does; SSH a manual `lineup.json` → the human wins).
+Two scheduled Routines fire **into the persistent operator session** (the Claude Code cloud session that built this system) — **Thu 20:00 UTC and Sun 13:00 UTC**, chosen so they land 1.5–2.5h before the Mac runs on both sides of the November DST change. (Fresh-session-per-firing mode was tried first and abandoned: those sessions finished the research but their pushes to `main` were held for a review nobody watches — see `docs/ENHANCEMENT_PLAN.md`. The pipeline as shipped is smoke-validated end to end: fire → advice commit on `main` → `run.sh`-style extraction → freshness parse.) Each firing follows `docs/ROUTINE_PROMPT.md`: read `roster.json` + `league_settings.json` + recent `advice/history/`, research the slate (injuries, confirmed inactives, weather, Vegas context, expert consensus, kickoff locks), then commit `advice/lineup.json` and a rationale file to `main` and end with a summary notification — opening the human **veto window** before the Mac run (do nothing → advice executes; `touch PAUSED` → nothing does; SSH a manual `lineup.json` → the human wins).
 
 While `roster.json` still contains `Placeholder` names, Routines run in **SMOKE MODE**: they push an empty-swaps advice file that validates the pipeline without generating real advice (the executor treats empty swaps as "no advice" and runs the optimizer).
 
@@ -249,7 +249,7 @@ The two Routines (Thu 20:00 / Sun 13:00 UTC) and all executor plumbing ship with
 | Critical battery force-sleep | Same dead-man alert | Confirm AC connection/adapter |
 | `lineup.json` stale or malformed | Ignored (freshness / shape check) → advice or optimizer ran | Fix or delete the file if you wanted the override |
 | `lineup.json` fresh but names typo'd | Unmatched entries skipped (after name normalization) → `NO_CHANGE`, `source: manual`. A fresh manual override is authoritative: the optimizer does **not** run, so it can't churn a lineup you set deliberately | Fix the names (or delete the file to re-enable the optimizer) |
-| Routine didn't fire / push failed / advice stale | `generated_at` freshness check discards it → optimizer ran (`source: optimizer`) | Nothing urgent — check the Routine's session if it repeats |
+| Routine didn't fire / push failed / advice stale or future-dated | `generated_at` freshness check discards it (stale, or >1h in the future) → optimizer ran (`source: optimizer`) | Nothing urgent — check the operator session's Routine firings if it repeats |
 | Routine advice names nobody on the roster | Zero entries validate → optimizer ran | Update `roster.json` (names must match Yahoo's rendering) |
 | Player ruled OUT after advice was generated | Executor's own `startable()` check (live Yahoo badge) rejects that entry at run time | None — guardrail did its job |
 
