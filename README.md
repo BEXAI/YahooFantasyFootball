@@ -9,6 +9,12 @@ Sets your Yahoo Fantasy Football lineup automatically before Thursday and Sunday
 ### 1.1 Big picture
 
 ```
+Claude Code Routines (cloud · fresh session per firing · optional layer)
+│    Thu 20:00 UTC & Sun 13:00 UTC — research injuries/weather/Vegas/consensus
+│    → commit advice/lineup.json + rationale to main → push notification (veto window)
+▼
+GitHub repo (data channel + season memory in advice/history/)
+▼
 MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 │
 ├─ launchd LaunchAgents (Mac local time = ET in Miami)
@@ -16,6 +22,8 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 │    └─ com.nathaniel.ffl.sun   → Sun 10:30  (≈2h30m before early locks)
 │         │
 │         └─ run.sh
+│              ├─ advice fetch: git fetch + git show → advice_remote.json
+│              │            (never merges; offline keeps previous extract)
 │              ├─ sentinel: SleepDisabled==1 ? (warn via ntfy if not)
 │              ├─ caffeinate -i  .venv/bin/python set_lineup.py
 │              │     ├─ 0 PAUSED file present ? → report planned swaps
@@ -24,8 +32,8 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 │              │     │            login-guard → abort+notify if sign-in page
 │              │     │            parse roster: slot, player, status, bye,
 │              │     │            Yahoo projected pts, locked flag
-│              │     ├─ 2 DECIDE  lineup.json override if fresh, else
-│              │     │            greedy optimizer (eligibility map,
+│              │     ├─ 2 DECIDE  manual lineup.json > fresh Routine advice
+│              │     │            > greedy optimizer (eligibility map,
 │              │     │            never BYE/OUT, min_gain threshold)
 │              │     ├─ 3 WRITE   Swap Mode: click starter slot →
 │              │     │            click highlighted bench player,
@@ -53,7 +61,11 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 | `set_lineup.py` | The agent — the five stages in the diagram. Everything below (§1.3–§1.6) is its contract. |
 | `seed_login.py` | One-time, lid-open, **headed** login that seeds `./profile` (persistent Chromium cookies). The agent never touches credentials — it only reuses this profile. |
 | `install.sh` / `arm.sh` / `smoke_test.sh` / `teardown.sh` | Setup, arming, lid-closed smoke test, and full revert — used in §2. |
-| `tests/` | 32 browser-free unit tests over the decision logic; run by CI (`.github/workflows/tests.yml`). |
+| `roster.json` | Your roster, names exactly as Yahoo renders them — the research Routines' input; edit after every add/drop. |
+| `league_settings.json` | Slots/eligibility/scoring for the Routines (`config.json` is gitignored so the cloud can't read it; keep the two eligibility maps in sync). |
+| `advice/` | Routine-committed `lineup.json` + `history/` rationale archive — the data channel and season memory (see §1.5b). |
+| `docs/ROUTINE_PROMPT.md` | Versioned operating instructions the research Routines follow; `docs/ENHANCEMENT_PLAN.md` holds the design rationale. |
+| `tests/` | 56 browser-free unit tests over the decision logic; run by CI (`.github/workflows/tests.yml`). |
 
 ### 1.3 Data files and their schemas
 
@@ -63,19 +75,19 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 |---|---|
 | `league_id`, `team_id` | From your team URL: `https://football.fantasysports.yahoo.com/f1/<league_id>/<team_id>` |
 | `min_swap_gain` | Bench must project at least this many points above a healthy starter to justify a swap (anti-churn threshold; default `1.0`) |
-| `lineup_json_max_age_hours` | Override freshness window (default `20`) — older `lineup.json` is ignored |
+| `lineup_json_max_age_hours` | Manual-override freshness window (default `20`) — older `lineup.json` is ignored |
+| `advice_max_age_hours` | Routine-advice freshness window (default `6`), measured against the advice file's embedded `generated_at` |
 | `ntfy_topic` | Random topic name; subscribe to it in the iPhone ntfy app |
 | `healthchecks_url` | Ping URL of your healthchecks.io check |
 | `slot_eligibility` | Map of **primary position → slots that position may fill**, e.g. `"RB": ["RB", "W/R/T"]`. Adjust for your league's flex types (superflex: add `"Q/W/R/T"` entries) |
 | `bad_statuses` | Statuses that are never startable: `["O","IR","SUSP","NA","PUP","NFI"]` (`Q` and `D` remain startable) |
 
-**`lineup.json`** (optional override, gitignored; format in `lineup.sample.json`):
+**Override sources** — the DECIDE stage consumes two override files through one validation path (normalized name matching, startable/unlocked/eligible checks, each player in at most one swap), with different trust levels:
 
-```json
-{"swaps": [{"out": "Starter Player Name", "in": "Bench Player Name"}]}
-```
+- **`lineup.json`** (gitignored, human-written via SSH; format in `lineup.sample.json`): `{"swaps": [{"out": "...", "in": "..."}]}`. Fresh by file mtime (< `lineup_json_max_age_hours`, default 20) → **authoritative**: the optimizer does not run, even if no entry validates — it can't churn a lineup you set deliberately.
+- **`advice/lineup.json`** (tracked, committed by the research Routines; extracted by `run.sh` into gitignored `advice_remote.json`): same `swaps` shape plus a required `generated_at` ISO-8601 timestamp. Freshness comes from `generated_at` (< `advice_max_age_hours`, default 6) — never mtime, which git extraction resets. Fresh advice whose entries **all** fail validation is treated as garbage research and the optimizer runs instead.
 
-Fresh (< `lineup_json_max_age_hours`) → it is **authoritative**: their swaps are validated (names must match, bench player startable/unlocked/eligible, no player twice) and the optimizer does not run. Stale, malformed, or wrong-shaped → ignored, optimizer runs.
+Priority: manual `lineup.json` > fresh advice > optimizer. `last_status.json` reports which source ran as `source: manual|advice|optimizer`.
 
 **`logs/last_status.json`** (written by every run):
 
@@ -90,8 +102,9 @@ Fresh (< `lineup_json_max_age_hours`) → it is **authoritative**: their swaps a
 
 ### 1.4 The DECIDE stage
 
-1. If a **fresh `lineup.json`** exists, use it (validated, authoritative — see §1.3).
-2. Otherwise the **greedy optimizer**, two conservative passes:
+1. If a **fresh manual `lineup.json`** exists, use it (validated, authoritative — see §1.3).
+2. Otherwise, if **fresh Routine advice** exists and at least one entry validates, use it.
+3. Otherwise the **greedy optimizer**, two conservative passes:
    - **Pass 1 — never start a dead slot:** every unstartable starter (BYE or bad status) is replaced by the highest-projected startable, unlocked, slot-eligible bench player.
    - **Pass 2 — upgrades over the threshold:** a healthy, unlocked starter is upgraded only when a bench candidate projects ≥ `min_swap_gain` points higher.
    - Each bench player is used at most once; `Q`/`D` players are startable; locked bench players are never swapped in.
@@ -103,6 +116,14 @@ This is deliberately not a global optimum search — it is a conservative, expla
 Writes use Yahoo's **Swap Mode**: click the starter's slot control, then click the highlighted bench player. After every swap the roster is **re-parsed and the swap confirmed** before continuing; after any failure (timeout, verify miss) the page is hard-reloaded so a dangling selection can never turn the next click into an unplanned write, and each swap is preceded by a pre-check that the outgoing starter still holds the planned slot. Before/after full-page PNGs are kept for every run.
 
 > **DOM contract:** three selectors are deliberately loose and tagged `Phase 2: pin` in `set_lineup.py` — the projected-points column index, the slot-control locator, and lock detection. They MUST be pinned against your live roster page (step 5 in §2) before any live write. Everything else is behavior, not guesswork.
+
+### 1.5b The research layer (Claude Code Routines)
+
+Two scheduled Routines fire fresh cloud sessions in this repo's environment — **Thu 20:00 UTC and Sun 13:00 UTC**, chosen so they land 1.5–2.5h before the Mac runs on both sides of the November DST change. Each session follows `docs/ROUTINE_PROMPT.md`: read `roster.json` + `league_settings.json` + recent `advice/history/`, research the slate (injuries, confirmed inactives, weather, Vegas context, expert consensus, kickoff locks), then commit `advice/lineup.json` and a rationale file to `main` and end with a summary that arrives as a push notification — opening the human **veto window** before the Mac run (do nothing → advice executes; `touch PAUSED` → nothing does; SSH a manual `lineup.json` → the human wins).
+
+While `roster.json` still contains `Placeholder` names, Routines run in **SMOKE MODE**: they push an empty-swaps advice file that validates the pipeline without generating real advice (the executor treats empty swaps as "no advice" and runs the optimizer).
+
+The layer is fail-safe by construction: no commit, a late commit, a wrong timestamp, or hallucinated names all degrade to the optimizer. The Mac never needs an Anthropic key; the cloud never sees Yahoo cookies. **Note:** in a public repo the advice commits reveal your planned lineup hours before lock — consider making the repo private (the Mac then needs a read credential for its fetch).
 
 ### 1.6 Hard guardrails (encoded in code, not just documented)
 
@@ -200,6 +221,18 @@ cat logs/last_status.json           # DRY status generated lid-closed = PASS
 4. **Optional Claude handoff:** before any run, have Claude (chat/mobile) output swaps and save from your phone via SSH: `echo '{"swaps":[{"out":"Player A","in":"Player B"}]}' > ~/ffl-agent/lineup.json` — fresh file overrides the optimizer (§1.3).
 5. **iPhone console:** Termius profile → `cd ~/ffl-agent && ./run.sh` for on-demand re-runs; ntfy app for alerts.
 
+### Step 10 — Enable the research layer (optional, recommended)
+
+The two Routines (Thu 20:00 / Sun 13:00 UTC) and all executor plumbing ship with the repo — enabling real advice is data entry:
+
+1. Edit `roster.json` on `main`: replace every `Placeholder` entry with your actual roster, names **exactly** as Yahoo renders them. (Until then, Routines run harmless SMOKE MODE pushes.)
+2. Edit `league_settings.json` to match your league's slots, eligibility, and scoring — keep `slot_eligibility` identical to your Mac's `config.json`.
+3. On the Mac: `git pull` so `run.sh` gains the advice-fetch step, then `DRY_RUN=1 .venv/bin/python set_lineup.py` — `last_status.json` should show `source: advice` when fresh advice exists.
+4. Decide repo visibility (§1.5b note): private hides your planned lineup from league-mates but requires a read credential on the Mac.
+5. Update `roster.json` after every add/drop — advice naming dropped players simply fails validation and the optimizer covers the gap.
+
+**Accept:** a Routine firing produces an advice commit on `main`, a push notification on the iPhone, and the next Mac dry run reports `source: advice`.
+
 ---
 
 ## 3. Reference
@@ -214,8 +247,11 @@ cat logs/last_status.json           # DRY status generated lid-closed = PASS
 | Yahoo DOM redesign | Parse returns 0 players → `ERROR` exit 4; or verify-fail `PARTIAL` | Re-pin the 3 DOM-contract selectors (step 5 procedure) |
 | Power outage → battery drained → Mac off | Missed ping → healthchecks alert | Manual power-on + login (Apple Silicon can't auto-boot); battery rides out short outages |
 | Critical battery force-sleep | Same dead-man alert | Confirm AC connection/adapter |
-| `lineup.json` stale or malformed | Ignored (freshness / shape check) → optimizer fallback ran | Fix or delete the file if you wanted the override |
-| `lineup.json` fresh but names typo'd | Unmatched entries skipped → `NO_CHANGE (lineup.json)`. A fresh override is authoritative: the optimizer does **not** run, so it can't churn a lineup you set deliberately | Fix the names (or delete the file to re-enable the optimizer) |
+| `lineup.json` stale or malformed | Ignored (freshness / shape check) → advice or optimizer ran | Fix or delete the file if you wanted the override |
+| `lineup.json` fresh but names typo'd | Unmatched entries skipped (after name normalization) → `NO_CHANGE`, `source: manual`. A fresh manual override is authoritative: the optimizer does **not** run, so it can't churn a lineup you set deliberately | Fix the names (or delete the file to re-enable the optimizer) |
+| Routine didn't fire / push failed / advice stale | `generated_at` freshness check discards it → optimizer ran (`source: optimizer`) | Nothing urgent — check the Routine's session if it repeats |
+| Routine advice names nobody on the roster | Zero entries validate → optimizer ran | Update `roster.json` (names must match Yahoo's rendering) |
+| Player ruled OUT after advice was generated | Executor's own `startable()` check (live Yahoo badge) rejects that entry at run time | None — guardrail did its job |
 
 ### 3.2 Ops notes & revert
 

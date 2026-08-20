@@ -1,6 +1,7 @@
 # Enhancement Plan — Claude Decide-Layer via Claude Code Routines
 
-**Status: PLAN — not yet implemented.** This document specifies how to add a scheduled
+**Status: IMPLEMENTED (phases A + B).** Phase C is the user's Mac-side data entry
+(README §2 step 10); phase D remains optional future work. This document specifies how to add a scheduled
 Claude research layer to the existing lid-closed executor without weakening any of its
 guarantees. The executor (`set_lineup.py` on the MacBook) stays the only thing that
 touches Yahoo; Claude becomes an optional upstream brain whose failure mode is always

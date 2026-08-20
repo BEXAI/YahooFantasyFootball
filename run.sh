@@ -9,6 +9,15 @@ LOG="logs/run_$TS.log"
 { read -r HC; read -r TOPIC; } < <(python3 -c \
   'import json;c=json.load(open("config.json"));print(c["healthchecks_url"]);print(c["ntfy_topic"])') || { HC=""; TOPIC=""; }
 
+# Research-layer advice: extract the latest committed advice WITHOUT merging
+# (git show never touches the working tree state). Offline => keep the previous
+# extract; its embedded generated_at freshness check governs. If fetch works but
+# the file is gone from main, drop the stale local copy.
+if git fetch origin main >/dev/null 2>&1; then
+  git show FETCH_HEAD:advice/lineup.json > advice_remote.json 2>/dev/null \
+    || rm -f advice_remote.json
+fi
+
 # Sentinel: if the sleep flag got reset (macOS update/reboot), this run only
 # happened because the lid is open — warn so you re-arm before the next one.
 if ! pmset -g | grep "SleepDisabled" | grep -q "1"; then

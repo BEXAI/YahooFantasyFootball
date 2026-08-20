@@ -4,6 +4,11 @@ Yahoo Fantasy Football lineup setter — pure Playwright, headless, no Claude.
 READ -> DECIDE -> WRITE (Swap Mode) -> VERIFY -> REPORT.
 Exit codes: 0 ok/no-change/partial, 2 LOGIN_REQUIRED, 3 write error, 4 parse error.
 
+DECIDE sources, in priority order (see docs/ENHANCEMENT_PLAN.md):
+  manual    lineup.json (SSH-written, mtime-fresh)  — authoritative
+  advice    advice_remote.json (Routine-committed, generated_at-fresh)
+  optimizer greedy two-pass fallback — always available
+
 Hard guardrails (encoded below, do not weaken):
   - position swaps only — never add/drop/trade
   - never start BYE/OUT/IR/SUSP players
@@ -133,22 +138,106 @@ def startable(p):
     return not p["bye"] and p["status"] not in BAD
 
 
-def load_override():
+def _read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _valid_swap_list(data):
+    if not isinstance(data, dict):
+        return None
+    swaps = data.get("swaps")                       # [{"out": "...", "in": "..."}]
+    if (isinstance(swaps, list) and swaps
+            and all(isinstance(s, dict) for s in swaps)):
+        return swaps
+    return None                                     # wrong/empty shape → next source
+
+
+def load_manual_override():
+    """Human-written lineup.json (SSH). Fresh (mtime) => AUTHORITATIVE."""
     f = ROOT / "lineup.json"
     if not f.exists():
         return None
-    try:
-        data = json.loads(f.read_text())
-        age_h = (time.time() - f.stat().st_mtime) / 3600
-        if age_h > CFG["lineup_json_max_age_hours"]:
-            return None
-        swaps = data.get("swaps")                   # [{"out": "...", "in": "..."}]
-        if (isinstance(swaps, list) and swaps
-                and all(isinstance(s, dict) for s in swaps)):
-            return swaps
-        return None                                 # wrong shape → optimizer fallback
-    except Exception:
+    age_h = (time.time() - f.stat().st_mtime) / 3600
+    if age_h > CFG["lineup_json_max_age_hours"]:
         return None
+    return _valid_swap_list(_read_json(f))
+
+
+def load_advice():
+    """Routine-committed advice extracted by run.sh into advice_remote.json.
+    Freshness comes from the embedded generated_at, never mtime — git extraction
+    resets mtime to extraction time, which would make stale advice look fresh."""
+    f = ROOT / "advice_remote.json"
+    if not f.exists():
+        return None
+    data = _read_json(f)
+    if not isinstance(data, dict):
+        return None
+    try:
+        gen = datetime.datetime.fromisoformat(
+            str(data.get("generated_at")).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if gen.tzinfo is None:
+        gen = gen.replace(tzinfo=datetime.timezone.utc)
+    age_h = (datetime.datetime.now(datetime.timezone.utc) - gen).total_seconds() / 3600
+    if age_h > CFG.get("advice_max_age_hours", 6):
+        return None
+    return _valid_swap_list(data)
+
+
+_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
+def norm_name(s):
+    """Match names across renderings: 'D.J. Moore' == 'DJ Moore', drop Jr/III etc."""
+    s = re.sub(r"[^a-z0-9 ]", "", (s or "").casefold())
+    return " ".join(p for p in s.split() if p not in _SUFFIXES)
+
+
+def roster_index(roster):
+    """normalized name -> player; a normalized-name collision maps to None so an
+    ambiguous override entry is skipped, never guessed."""
+    idx = {}
+    for p in roster:
+        k = norm_name(p["name"])
+        idx[k] = None if k in idx else p
+    return idx
+
+
+def build_override_swaps(roster, entries):
+    """Validate override entries (manual or advice) against the parsed roster.
+    Same guardrails as the optimizer: startable, unlocked, slot-eligible, and
+    each player in at most one swap."""
+    idx = roster_index(roster)
+    swaps, used = [], set()
+    for s in entries or []:
+        st, bn = idx.get(norm_name(s.get("out"))), idx.get(norm_name(s.get("in")))
+        if (st and bn and st is not bn
+                and st["name"] not in used and bn["name"] not in used
+                and startable(bn) and not bn["locked"] and eligible(bn, st["slot"])):
+            swaps.append((st["name"], bn["name"], st["slot"],
+                          round(bn["proj"] - st["proj"], 1)))
+            used.update((st["name"], bn["name"]))
+    return swaps
+
+
+def decide(roster):
+    """Decision chain: manual override > fresh advice > optimizer.
+    Manual is authoritative even when nothing validates (the human chose it);
+    advice with ZERO validated entries is treated as garbage and falls back."""
+    manual = load_manual_override()
+    if manual is not None:
+        return build_override_swaps(roster, manual), "manual"
+    advice = load_advice()
+    if advice:
+        swaps = build_override_swaps(roster, advice)
+        if swaps:
+            return swaps, "advice"
+    return plan_swaps(roster), "optimizer"
 
 
 def plan_swaps(roster):
@@ -256,23 +345,7 @@ def main():
         page.screenshot(path=str(ROOT / "screenshots" / f"before_{TS}.png"), full_page=True)
 
         roster = parse_roster(page)
-        override = load_override()
-        if override:
-            swaps, used = [], set()
-            by_name = {p["name"]: p for p in roster}
-            for s in override:
-                st, bn = by_name.get(s.get("out")), by_name.get(s.get("in"))
-                # `used` guard: a name repeated across override entries would make
-                # the second entry click a player who already moved — an unplanned,
-                # unverifiable write. Each player may appear in at most one swap.
-                if (st and bn and st["name"] not in used and bn["name"] not in used
-                        and startable(bn) and not bn["locked"] and eligible(bn, st["slot"])):
-                    swaps.append((st["name"], bn["name"], st["slot"], round(bn["proj"]-st["proj"],1)))
-                    used.update((st["name"], bn["name"]))
-            source = "lineup.json"
-        else:
-            swaps = plan_swaps(roster)
-            source = "optimizer"
+        swaps, source = decide(roster)
 
         if not swaps:
             page.screenshot(path=str(ROOT / "screenshots" / f"after_{TS}.png"), full_page=True)

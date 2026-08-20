@@ -1,0 +1,14 @@
+{
+  "note": "EDIT ME — read by the research Routine only (config.json is gitignored, so the cloud session cannot see it). Keep slot_eligibility identical to config.json on the Mac; the executor does NOT read this file.",
+  "scoring": "half_ppr",
+  "starting_slots": ["QB", "RB", "RB", "WR", "WR", "TE", "W/R/T", "K", "DEF"],
+  "bench_slots": 6,
+  "slot_eligibility": {
+    "QB":  ["QB"],
+    "RB":  ["RB", "W/R/T"],
+    "WR":  ["WR", "W/R/T"],
+    "TE":  ["TE", "W/R/T"],
+    "K":   ["K"],
+    "DEF": ["DEF"]
+  }
+}

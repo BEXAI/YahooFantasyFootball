@@ -199,52 +199,221 @@ def test_ir_slot_players_are_not_starters_or_bench():
     assert sl.plan_swaps(roster) == []
 
 
-# ---------- load_override (lineup.json freshness) ----------
+# ---------- name normalization ----------
 
-def test_override_fresh_file_returns_swaps(tmp_path, monkeypatch):
-    f = tmp_path / "lineup.json"
-    f.write_text(json.dumps({"swaps": [{"out": "A", "in": "B"}]}))
+@pytest.mark.parametrize("a,b", [
+    ("D.J. Moore", "DJ Moore"),
+    ("Odell Beckham Jr.", "Odell Beckham"),
+    ("Kenneth Walker III", "kenneth walker"),
+    ("  Amon-Ra   St. Brown ", "AmonRa St Brown"),
+])
+def test_norm_name_equivalences(a, b):
+    assert sl.norm_name(a) == sl.norm_name(b)
+
+
+def test_norm_name_handles_none_and_empty():
+    assert sl.norm_name(None) == ""
+    assert sl.norm_name("") == ""
+
+
+def test_roster_index_marks_ambiguous_names():
+    roster = [P("John Smith", "RB"), P("John Smith Jr.", "BN", primary="RB")]
+    idx = sl.roster_index(roster)
+    assert idx[sl.norm_name("John Smith")] is None   # collision → never guessed
+
+
+# ---------- load_manual_override (lineup.json, mtime freshness) ----------
+
+def test_manual_fresh_file_returns_swaps(tmp_path, monkeypatch):
+    (tmp_path / "lineup.json").write_text(json.dumps({"swaps": [{"out": "A", "in": "B"}]}))
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    assert sl.load_override() == [{"out": "A", "in": "B"}]
+    assert sl.load_manual_override() == [{"out": "A", "in": "B"}]
 
 
-def test_override_stale_file_ignored(tmp_path, monkeypatch):
+def test_manual_stale_file_ignored(tmp_path, monkeypatch):
+    import os
     f = tmp_path / "lineup.json"
     f.write_text(json.dumps({"swaps": [{"out": "A", "in": "B"}]}))
     stale = time.time() - (sl.CFG["lineup_json_max_age_hours"] + 1) * 3600
-    import os
     os.utime(f, (stale, stale))
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    assert sl.load_override() is None
+    assert sl.load_manual_override() is None
 
 
-def test_override_missing_file_returns_none(tmp_path, monkeypatch):
+@pytest.mark.parametrize("content", [
+    "{not json",
+    json.dumps({"swaps": []}),
+    json.dumps({"swaps": {"out": "A", "in": "B"}}),   # phone-SSH typo: dict not list
+    json.dumps({"swaps": ["A,B"]}),
+])
+def test_manual_bad_content_returns_none(tmp_path, monkeypatch, content):
+    (tmp_path / "lineup.json").write_text(content)
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    assert sl.load_override() is None
+    assert sl.load_manual_override() is None
 
 
-def test_override_malformed_json_returns_none(tmp_path, monkeypatch):
-    (tmp_path / "lineup.json").write_text("{not json")
+def test_manual_missing_file_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    assert sl.load_override() is None
+    assert sl.load_manual_override() is None
 
 
-def test_override_empty_swaps_returns_none(tmp_path, monkeypatch):
-    (tmp_path / "lineup.json").write_text(json.dumps({"swaps": []}))
+# ---------- load_advice (advice_remote.json, embedded-timestamp freshness) ----------
+
+def _write_advice(tmp_path, generated_at, swaps=None):
+    payload = {"generated_at": generated_at,
+               "swaps": swaps if swaps is not None else [{"out": "A", "in": "B"}]}
+    (tmp_path / "advice_remote.json").write_text(json.dumps(payload))
+
+
+def _iso(hours_ago):
+    import datetime as dt
+    t = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours_ago)
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_advice_fresh_timestamp_returns_swaps(tmp_path, monkeypatch):
+    _write_advice(tmp_path, _iso(1))
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    assert sl.load_override() is None
+    assert sl.load_advice() == [{"out": "A", "in": "B"}]
 
 
-def test_override_swaps_dict_instead_of_list_returns_none(tmp_path, monkeypatch):
-    # realistic phone-SSH typo: {"swaps": {"out": ..., "in": ...}} — must fall
-    # back to the optimizer instead of crashing main with AttributeError
+def test_advice_stale_timestamp_ignored_even_with_fresh_mtime(tmp_path, monkeypatch):
+    # THE trap: git extraction resets mtime to now — freshness must come from
+    # the embedded generated_at, or Thursday's advice would run on Sunday.
+    _write_advice(tmp_path, _iso(sl.CFG.get("advice_max_age_hours", 6) + 1))
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_advice() is None
+
+
+def test_advice_naive_timestamp_treated_as_utc(tmp_path, monkeypatch):
+    _write_advice(tmp_path, _iso(1).rstrip("Z"))    # no tz marker
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_advice() == [{"out": "A", "in": "B"}]
+
+
+@pytest.mark.parametrize("generated_at", [None, "not-a-date", 12345])
+def test_advice_bad_timestamp_ignored(tmp_path, monkeypatch, generated_at):
+    (tmp_path / "advice_remote.json").write_text(
+        json.dumps({"generated_at": generated_at, "swaps": [{"out": "A", "in": "B"}]}))
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_advice() is None
+
+
+def test_advice_empty_swaps_returns_none(tmp_path, monkeypatch):
+    _write_advice(tmp_path, _iso(1), swaps=[])
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_advice() is None
+
+
+def test_advice_missing_or_malformed_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    assert sl.load_advice() is None
+    (tmp_path / "advice_remote.json").write_text("[1, 2]")
+    assert sl.load_advice() is None
+
+
+# ---------- build_override_swaps ----------
+
+def _two_player_roster():
+    return [
+        P("DJ Moore", "WR", primary="WR", proj=8.0),
+        P("Bench Receiver", "BN", primary="WR", proj=12.0),
+    ]
+
+
+def test_override_swaps_match_via_normalization():
+    swaps = sl.build_override_swaps(
+        _two_player_roster(), [{"out": "D.J. Moore", "in": "bench receiver"}])
+    assert swaps == [("DJ Moore", "Bench Receiver", "WR", 4.0)]
+
+
+def test_override_swaps_dedup_repeated_player():
+    roster = _two_player_roster() + [P("Other WR", "WR", primary="WR", proj=5.0)]
+    swaps = sl.build_override_swaps(roster, [
+        {"out": "DJ Moore", "in": "Bench Receiver"},
+        {"out": "Other WR", "in": "Bench Receiver"},     # reuse → must be dropped
+    ])
+    assert len(swaps) == 1
+
+
+def test_override_swaps_reject_unstartable_locked_ineligible():
+    roster = [
+        P("Starter WR", "WR", primary="WR", proj=8.0),
+        P("Out Bench", "BN", primary="WR", proj=15.0, status="O"),
+        P("Locked Bench", "BN", primary="WR", proj=15.0, locked=True),
+        P("Bench QB", "BN", primary="QB", proj=25.0),
+    ]
+    for bad in ("Out Bench", "Locked Bench", "Bench QB"):
+        assert sl.build_override_swaps(roster, [{"out": "Starter WR", "in": bad}]) == []
+
+
+def test_override_swaps_unknown_names_skipped():
+    assert sl.build_override_swaps(
+        _two_player_roster(), [{"out": "Nobody", "in": "Bench Receiver"}]) == []
+
+
+def test_override_swaps_self_swap_rejected():
+    # out and in resolving to the same player must never produce a "swap"
+    assert sl.build_override_swaps(
+        _two_player_roster(), [{"out": "DJ Moore", "in": "D.J. Moore"}]) == []
+
+
+# ---------- decide (priority chain) ----------
+
+def _chain_roster():
+    # optimizer would swap: starter 5.0 vs bench 10.0 (gain 5.0 ≥ min_swap_gain)
+    return [
+        P("Weak Starter", "WR", primary="WR", proj=5.0),
+        P("Strong Bench", "BN", primary="WR", proj=10.0),
+        P("Other Bench", "BN", primary="WR", proj=7.0),
+    ]
+
+
+def test_decide_manual_beats_advice_and_optimizer(tmp_path, monkeypatch):
     (tmp_path / "lineup.json").write_text(
-        json.dumps({"swaps": {"out": "A", "in": "B"}}))
+        json.dumps({"swaps": [{"out": "Weak Starter", "in": "Other Bench"}]}))
+    _write_advice(tmp_path, _iso(1), swaps=[{"out": "Weak Starter", "in": "Strong Bench"}])
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    assert sl.load_override() is None
+    swaps, source = sl.decide(_chain_roster())
+    assert source == "manual"
+    assert swaps == [("Weak Starter", "Other Bench", "WR", 2.0)]
 
 
-def test_override_swaps_list_of_strings_returns_none(tmp_path, monkeypatch):
-    (tmp_path / "lineup.json").write_text(json.dumps({"swaps": ["A,B"]}))
+def test_decide_manual_authoritative_even_when_nothing_validates(tmp_path, monkeypatch):
+    (tmp_path / "lineup.json").write_text(
+        json.dumps({"swaps": [{"out": "Typo Name", "in": "Also Wrong"}]}))
     monkeypatch.setattr(sl, "ROOT", tmp_path)
-    assert sl.load_override() is None
+    swaps, source = sl.decide(_chain_roster())
+    assert (swaps, source) == ([], "manual")     # human chose it; optimizer must not churn
+
+
+def test_decide_advice_used_when_no_manual(tmp_path, monkeypatch):
+    _write_advice(tmp_path, _iso(1), swaps=[{"out": "Weak Starter", "in": "Strong Bench"}])
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    swaps, source = sl.decide(_chain_roster())
+    assert source == "advice"
+    assert swaps == [("Weak Starter", "Strong Bench", "WR", 5.0)]
+
+
+def test_decide_garbage_advice_falls_back_to_optimizer(tmp_path, monkeypatch):
+    # fresh advice whose entries ALL fail validation = hallucinated research
+    _write_advice(tmp_path, _iso(1), swaps=[{"out": "Hallucinated", "in": "Not Real"}])
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    swaps, source = sl.decide(_chain_roster())
+    assert source == "optimizer"
+    assert swaps == [("Weak Starter", "Strong Bench", "WR", 5.0)]
+
+
+def test_decide_stale_advice_falls_back_to_optimizer(tmp_path, monkeypatch):
+    _write_advice(tmp_path, _iso(sl.CFG.get("advice_max_age_hours", 6) + 1),
+                  swaps=[{"out": "Weak Starter", "in": "Strong Bench"}])
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    swaps, source = sl.decide(_chain_roster())
+    assert source == "optimizer"
+
+
+def test_decide_nothing_present_runs_optimizer(tmp_path, monkeypatch):
+    monkeypatch.setattr(sl, "ROOT", tmp_path)
+    swaps, source = sl.decide(_chain_roster())
+    assert source == "optimizer"
+    assert swaps == [("Weak Starter", "Strong Bench", "WR", 5.0)]

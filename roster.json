@@ -1,0 +1,14 @@
+{
+  "note": "EDIT ME — replace the placeholder players with your actual Yahoo roster. 'name' must match Yahoo's rendering exactly (the research Routine copies these names verbatim into its advice). Update this file after every add/drop. While any name contains 'Placeholder', Routines run in SMOKE MODE and push no real advice.",
+  "updated": "2026-08-20",
+  "players": [
+    {"name": "Placeholder QB One",  "position": "QB",  "team": "MIA"},
+    {"name": "Placeholder RB One",  "position": "RB",  "team": "MIA"},
+    {"name": "Placeholder RB Two",  "position": "RB",  "team": "MIA"},
+    {"name": "Placeholder WR One",  "position": "WR",  "team": "MIA"},
+    {"name": "Placeholder WR Two",  "position": "WR",  "team": "MIA"},
+    {"name": "Placeholder TE One",  "position": "TE",  "team": "MIA"},
+    {"name": "Placeholder K One",   "position": "K",   "team": "MIA"},
+    {"name": "Placeholder DEF One", "position": "DEF", "team": "MIA"}
+  ]
+}

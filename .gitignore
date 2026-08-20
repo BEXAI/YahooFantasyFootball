@@ -3,6 +3,7 @@ profile/
 PAUSED
 lineup.json
 config.json
+advice_remote.json
 
 # Generated artifacts
 logs/*
