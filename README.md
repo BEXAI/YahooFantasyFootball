@@ -9,7 +9,7 @@ Sets your Yahoo Fantasy Football lineup automatically before Thursday and Sunday
 ### 1.1 Big picture
 
 ```
-Claude Code Routines (cloud · fresh session per firing · optional layer)
+Claude Code Routines (cloud · fire into the operator session · optional layer)
 │    Thu 20:00 UTC & Sun 13:00 UTC — research injuries/weather/Vegas/consensus
 │    → commit advice/lineup.json + rationale to main → push notification (veto window)
 ▼
