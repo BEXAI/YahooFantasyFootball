@@ -1,0 +1,17 @@
+# Runtime state — never commit
+profile/
+PAUSED
+lineup.json
+config.json
+
+# Generated artifacts
+logs/*
+!logs/.gitkeep
+screenshots/*
+!screenshots/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

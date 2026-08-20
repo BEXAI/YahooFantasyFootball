@@ -1,0 +1,17 @@
+{
+  "league_id": "REPLACE_ME",
+  "team_id": "REPLACE_ME",
+  "min_swap_gain": 1.0,
+  "lineup_json_max_age_hours": 20,
+  "ntfy_topic": "ffl-nate-REPLACE_RANDOM",
+  "healthchecks_url": "https://hc-ping.com/REPLACE_UUID",
+  "slot_eligibility": {
+    "QB":  ["QB"],
+    "RB":  ["RB", "W/R/T"],
+    "WR":  ["WR", "W/R/T"],
+    "TE":  ["TE", "W/R/T"],
+    "K":   ["K"],
+    "DEF": ["DEF"]
+  },
+  "bad_statuses": ["O", "IR", "SUSP", "NA", "PUP", "NFI"]
+}

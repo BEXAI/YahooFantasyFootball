@@ -1,0 +1,6 @@
+{
+  "swaps": [
+    {"out": "Starter Player Name", "in": "Bench Player Name"},
+    {"out": "Another Starter", "in": "Another Bench Player"}
+  ]
+}

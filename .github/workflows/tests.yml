@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps (no browsers needed — decision-logic tests only)
+        run: pip install -r requirements.txt pytest
+      - name: Run unit tests
+        run: pytest tests/ -v
+      - name: Shell syntax check
+        run: bash -n run.sh install.sh arm.sh smoke_test.sh teardown.sh
