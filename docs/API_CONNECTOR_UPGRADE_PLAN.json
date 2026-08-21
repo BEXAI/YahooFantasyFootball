@@ -37,7 +37,7 @@
     },
     "research_findings": {
       "yahoo_api": "Yahoo Fantasy Sports API (fantasysports.yahooapis.com/fantasy/v2) supports OAuth 2.0 with scopes fspt-r (read) and fspt-w (read/write). Write ops: PUT /team/{team_key}/roster with an XML body changes player positions; POST to league transactions does add/drop (FORBIDDEN in this system, see non_negotiables). Developer apps are created free at developer.yahoo.com with Fantasy Sports Read or Read/Write permission. Access tokens expire ~1h; refresh tokens are long-lived (grant_type=refresh_token at https://api.login.yahoo.com/oauth2/get_token).",
-      "custom_connectors": "claude.ai custom connectors are remote MCP servers: publicly reachable HTTPS (Claude connects from Anthropic's cloud), streamable HTTP transport, auth via OAuth (client id/secret under Advanced Settings); a raw bearer-header field is NOT an established UI capability (anthropics/claude-ai-mcp#112), so shared-token servers should accept the token in the URL (`?key=`). Added at Settings -> Connectors -> + -> Add custom connector. Available on the owner's plan.",
+      "custom_connectors": "claude.ai custom connectors are remote MCP servers: publicly reachable HTTPS (Claude connects from Anthropic's cloud), streamable HTTP transport. AUTH REALITY (verified): the Add-custom-connector UI supports ONLY OAuth 2.1 (client id/secret under Advanced Settings) or no-auth — there is NO bearer/API-key/custom-header field (anthropics/claude-ai-mcp#112, closed not-planned; July 2026 third-party docs concur). The claude.ai-compatible shared-secret design is therefore 'no-auth plus an unguessable URL': the token rides in the URL as a path segment https://host/<token>/mcp (preferred; stripped server-side) or ?key= query param, with Authorization: Bearer kept only for curl/inspector testing. Under URL-secret auth ENABLE_WRITES must stay false. If claude.ai rejects even the URL forms at P4.T1, the fallback is implementing MCP-spec OAuth 2.1 on the server.",
       "prior_art": [
         {
           "repo": "https://github.com/derekrbreese/fantasy-football-mcp-public",
@@ -294,7 +294,7 @@
           "id": "P3.T6",
           "type": "deploy",
           "title": "Deploy + smoke",
-          "description": "Deploy to the chosen host; verify public HTTPS reachability and an end-to-end tools/list + ff_get_roster call with the bearer token.",
+          "description": "Deploy to the chosen host; verify public HTTPS reachability and an end-to-end tools/list + ff_get_roster call with the bearer token. Smoke MUST test the exact URL form claude.ai will use (secret path segment), not just the Authorization header — header-only smoke would pass while the claude.ai form 404s/401s.",
           "acceptance": "Public URL serving MCP with auth."
         }
       ]
@@ -308,7 +308,7 @@
           "id": "P4.T1",
           "type": "human",
           "title": "Add the custom connector",
-          "description": "claude.ai (or iOS app) Settings -> Connectors -> + -> Add custom connector -> the P3.T6 URL INCLUDING the token as `?key=<token>` (treat the URL as a secret); try the bearer field under Advanced Settings only if present. Verify tools appear in a normal chat ('what's my roster?').",
+          "description": "claude.ai (or iOS app) Settings -> Connectors -> + -> Add custom connector. URL: https://<host>/<CONNECTOR_TOKEN>/mcp (the secret-path form — treat the full URL as a credential). Advanced Settings stays empty (no OAuth). Verify tools appear in a normal chat ('what's my roster?'). If the connection fails, try the ?key= query form; if both URL forms fail, STOP and execute the OAuth 2.1 fallback (new task) before proceeding.",
           "acceptance": "Connector listed next to Gmail/Drive/etc. and callable from chat."
         },
         {

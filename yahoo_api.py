@@ -12,8 +12,9 @@ Field-mapping status (plan P0.T3): selected_position, eligible_positions,
 status, bye_weeks and the roster XML PUT shape follow Yahoo's documented API.
 Two fields are marked TODO(P0.T3) because only a live probe can pin them:
 the per-player editability/locked flag and projected-points availability.
-Until pinned, locked defaults to False (safe: a locked PUT fails per-player
-and is reported as skipped — plan N7 verify still governs) and proj defaults
+Until pinned, locked defaults to False (safe: Yahoo's roster PUT is ATOMIC
+per request, so with one PUT per swap a locked player fails only its own
+swap, which is reported as skipped — plan N7 verify still governs) and proj defaults
 to 0.0 with PROJ_AVAILABLE=False (safe: the optimizer degrades to pass 1,
 which still fixes BYE/OUT starters).
 """

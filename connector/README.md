@@ -17,16 +17,20 @@ guarded lineup swaps.
 
 ## Auth
 
-Static shared token, accepted two ways:
+claude.ai custom connectors support **only OAuth 2.1 or no-auth** — there is
+no bearer/API-key field (anthropics/claude-ai-mcp#112, closed not-planned).
+This server therefore uses "no-auth plus an unguessable URL": a shared token
+that must appear in every request, accepted three ways:
 
-1. `Authorization: Bearer $CONNECTOR_TOKEN` header, or
-2. `?key=$CONNECTOR_TOKEN` on the URL — **use this form for claude.ai**: the
-   Add-custom-connector UI's Advanced Settings expose OAuth client id/secret,
-   not a raw bearer field, so paste the full URL
-   `https://<host>/mcp?key=<token>` as the connector URL.
+1. **Path segment — use this for claude.ai:** `https://<host>/<token>/mcp`
+   (the token segment is stripped server-side before the MCP app sees the path)
+2. Query parameter: `https://<host>/mcp?key=<token>`
+3. `Authorization: Bearer <token>` header (curl / MCP inspector testing)
 
 Generate a long random token (`openssl rand -hex 32`); set it in the host's
-secret store. Treat the URL itself as a secret in form 2.
+secret store. **The URL is the credential — treat it like a password, and
+keep `ENABLE_WRITES` unset while using URL-secret auth.** If claude.ai ever
+rejects both URL forms, the fallback is implementing MCP-spec OAuth 2.1.
 
 ## Local run
 

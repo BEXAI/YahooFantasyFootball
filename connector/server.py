@@ -125,37 +125,55 @@ def ff_set_lineup(swaps: list[dict], confirm: bool = False) -> dict:
             "verified_slots": fresh, "week": week}
 
 
-class BearerAuth:
-    """Minimal ASGI middleware. Accepts the shared token either as
-    `Authorization: Bearer <token>` OR as a `?key=<token>` query parameter —
-    the query form exists because the claude.ai Add-custom-connector UI has
-    been reported to expose only OAuth client id/secret under Advanced
-    Settings, not a raw bearer field (anthropics/claude-ai-mcp#112); with the
-    query form the whole URL `https://host/mcp?key=<token>` can be pasted as
-    the connector URL. Non-http scopes (lifespan) pass through untouched or
-    the server can't even start."""
+class SecretUrlAuth:
+    """Minimal ASGI middleware. claude.ai custom connectors support ONLY
+    OAuth 2.1 or no-auth (anthropics/claude-ai-mcp#112, closed not-planned) —
+    there is no bearer/API-key field. So the claude.ai-compatible design is
+    "no-auth plus an unguessable URL": the shared token rides in the URL and
+    this middleware rejects everything that lacks it. Accepted forms:
+
+      1. path segment (PREFERRED for claude.ai):  https://host/<token>/mcp
+         — the segment is stripped before the request reaches the MCP app
+      2. query parameter:                         https://host/mcp?key=<token>
+      3. Authorization: Bearer <token>            (curl / MCP inspector)
+
+    SECURITY: under URL-secret auth the URL itself is the credential — treat
+    it like a password, and keep ENABLE_WRITES=false (the write tool should
+    not stand behind a secret that can leak via request logs).
+    Non-http scopes (lifespan) pass through or the server can't start."""
 
     def __init__(self, inner, token):
         self.inner, self.token = inner, token
+        self._prefix = f"/{token}"
 
-    def _authorized(self, scope):
+    def _authorized_and_rewritten(self, scope):
+        path = scope.get("path", "")
+        if path == self._prefix or path.startswith(self._prefix + "/"):
+            rest = path[len(self._prefix):] or "/"
+            scope = dict(scope, path=rest, raw_path=rest.encode())
+            return True, scope
         headers = {k.decode().lower(): v.decode()
                    for k, v in scope.get("headers", [])}
         if headers.get("authorization") == f"Bearer {self.token}":
-            return True
+            return True, scope
         query = urllib.parse.parse_qs(scope.get("query_string", b"").decode())
-        return self.token in query.get("key", [])
+        return (self.token in query.get("key", [])), scope
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and not self._authorized(scope):
-            await send({"type": "http.response.start", "status": 401,
-                        "headers": [(b"content-type", b"text/plain")]})
-            await send({"type": "http.response.body", "body": b"unauthorized"})
-            return
+        if scope["type"] == "http":
+            ok, scope = self._authorized_and_rewritten(scope)
+            if not ok:
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"unauthorized"})
+                return
         await self.inner(scope, receive, send)
+
+
+BearerAuth = SecretUrlAuth   # back-compat alias for tests/docs
 
 
 _token = os.environ.get("CONNECTOR_TOKEN")
 if not _token:
     raise SystemExit("CONNECTOR_TOKEN env var is required — refusing to start open.")
-app = BearerAuth(mcp.streamable_http_app(stateless_http=True), _token)
+app = SecretUrlAuth(mcp.streamable_http_app(stateless_http=True), _token)
