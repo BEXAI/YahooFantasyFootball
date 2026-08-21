@@ -16,9 +16,12 @@ sys.path.insert(0, str(ROOT))
 import yahoo_api  # noqa: E402
 
 
+_STRIP_KEYS = ("guid", "email", "image_url", "managers")   # PII never enters fixtures
+
+
 def sanitize(obj):
     if isinstance(obj, dict):
-        return {k: sanitize(v) for k, v in obj.items() if k not in ("guid",)}
+        return {k: sanitize(v) for k, v in obj.items() if k not in _STRIP_KEYS}
     if isinstance(obj, list):
         return [sanitize(v) for v in obj]
     return obj
@@ -48,6 +51,7 @@ def main():
     print("  update yahoo_api.read_roster's TODO(P0.T3) mappings and this fixture.")
 
     fx = ROOT / "tests" / "fixtures" / "roster_live.json"
+    fx.parent.mkdir(parents=True, exist_ok=True)
     fx.write_text(json.dumps(sanitize(raw), indent=1))
     print(f"\nSanitized fixture written: {fx}")
 

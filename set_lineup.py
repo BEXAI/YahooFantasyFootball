@@ -409,7 +409,10 @@ def api_main():
         finish("ERROR", {"summary": f"Yahoo API read failed: {e}"}, 4)
     if not roster:
         finish("ERROR", {"summary": "API roster returned 0 players"}, 4)
-    (ROOT / "logs" / f"api_roster_before_{TS}.json").write_text(json.dumps(roster, indent=1))
+    try:
+        (ROOT / "logs" / f"api_roster_before_{TS}.json").write_text(json.dumps(roster, indent=1))
+    except OSError as e:
+        print(f"[evidence-write-fail] {e}", file=sys.stderr)
 
     swaps, source, osk = decide(roster)
     osk_txt = f" | override skipped: {'; '.join(osk)}" if osk else ""
@@ -425,8 +428,11 @@ def api_main():
         finish("NO_CHANGE", {"summary": f"[{tag}] planned: {plan_txt}{osk_txt}",
                              "planned": plan_txt, **extra}, 0)
 
-    applied, skipped = [], []
     week = api.current_week
+    if not isinstance(week, int):
+        finish("ERROR", {"summary": "no coverage week in roster read — cannot PUT",
+                         **extra}, 4)
+    applied, skipped = [], []
     for (out_name, in_name, slot, gain) in swaps:
         try:
             changes = yahoo_api.changes_for_swap(out_name, in_name, slot, roster)
@@ -438,19 +444,26 @@ def api_main():
             skipped.append(f"{slot}: {out_name}→{in_name} (no unique roster match)")
         except yahoo_api.YahooApiError as e:
             skipped.append(f"{slot}: {out_name}→{in_name} (api-error: {type(e).__name__})")
+        except Exception as e:
+            # writes may already have landed — finish() below MUST still run
+            skipped.append(f"{slot}: {out_name}→{in_name} ({type(e).__name__})")
 
-    # verify-then-report (plan N7): the re-read is the authoritative record
+    # verify-then-report (plan N7): the re-read is the authoritative record.
+    # Nothing after a live PUT may crash past finish() — broad catches on purpose.
     done = []
     try:
         fresh = api.read_roster(week)
-        (ROOT / "logs" / f"api_roster_after_{TS}.json").write_text(json.dumps(fresh, indent=1))
+        try:
+            (ROOT / "logs" / f"api_roster_after_{TS}.json").write_text(json.dumps(fresh, indent=1))
+        except OSError as e:
+            print(f"[evidence-write-fail] {e}", file=sys.stderr)
         by = {p["name"]: p for p in fresh}
         for (out_name, in_name, slot, gain) in applied:
             if by.get(in_name, {}).get("slot") == slot:
                 done.append(f"{slot}: {out_name} → {in_name} (+{gain})")
             else:
                 skipped.append(f"{slot}: {out_name}→{in_name} (verify failed)")
-    except yahoo_api.YahooApiError:
+    except Exception:
         skipped.extend(f"{s[2]}: {s[0]}→{s[1]} (verify unavailable)" for s in applied)
 
     if done and not skipped:

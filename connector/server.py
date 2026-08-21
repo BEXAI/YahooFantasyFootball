@@ -89,6 +89,9 @@ def ff_set_lineup(swaps: list[dict], confirm: bool = False) -> dict:
                 "refused": "pass confirm=true after the human has approved these exact swaps"}
     roster = api().read_roster()
     week = api().current_week
+    if not isinstance(week, int):
+        return {"applied": [], "skipped": [],
+                "refused": "no coverage week available from the roster read"}
     idx = roster_index(roster)
     applied, skipped = [], []
     used = set()
@@ -119,10 +122,15 @@ def ff_set_lineup(swaps: list[dict], confirm: bool = False) -> dict:
                 skipped.append(f"{label} (locked)")
             except yahoo_api.YahooApiError as e:
                 skipped.append(f"{label} (api-error: {type(e).__name__})")
-    # verify-then-report (plan N7)
-    fresh = {p["name"]: p["slot"] for p in api().read_roster(week)}
-    return {"applied": applied, "skipped": skipped,
-            "verified_slots": fresh, "week": week}
+    # verify-then-report (plan N7) — a transient verify failure must not
+    # destroy the applied/skipped record of writes that already landed
+    try:
+        fresh = {p["name"]: p["slot"] for p in api().read_roster(week)}
+        return {"applied": applied, "skipped": skipped,
+                "verified_slots": fresh, "week": week}
+    except yahoo_api.YahooApiError as e:
+        return {"applied": applied, "skipped": skipped, "verified_slots": None,
+                "verify_error": type(e).__name__, "week": week}
 
 
 class SecretUrlAuth:
@@ -147,26 +155,45 @@ class SecretUrlAuth:
         self._prefix = f"/{token}"
 
     def _authorized_and_rewritten(self, scope):
-        path = scope.get("path", "")
-        if path == self._prefix or path.startswith(self._prefix + "/"):
-            rest = path[len(self._prefix):] or "/"
-            scope = dict(scope, path=rest, raw_path=rest.encode())
-            return True, scope
-        headers = {k.decode().lower(): v.decode()
-                   for k, v in scope.get("headers", [])}
-        if headers.get("authorization") == f"Bearer {self.token}":
-            return True, scope
-        query = urllib.parse.parse_qs(scope.get("query_string", b"").decode())
-        return (self.token in query.get("key", [])), scope
+        # latin-1 decodes are total over all byte values (HTTP wire encoding) —
+        # a hostile non-UTF-8 header must yield 401, never a 500
+        try:
+            path = scope.get("path", "")
+            if path == self._prefix or path.startswith(self._prefix + "/"):
+                rest = path[len(self._prefix):] or "/"
+                scope = dict(scope, path=rest, raw_path=rest.encode("latin-1"))
+                return True, scope
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                       for k, v in scope.get("headers", [])}
+            if headers.get("authorization") == f"Bearer {self.token}":
+                return True, scope
+            qs = scope.get("query_string", b"").decode("latin-1")
+            query = urllib.parse.parse_qs(qs)
+            if self.token in query.get("key", []):
+                # redact the credential before downstream code can log it
+                clean = urllib.parse.urlencode(
+                    [(k, v) for k, vs in query.items() if k != "key" for v in vs])
+                scope = dict(scope, query_string=clean.encode("latin-1"))
+                return True, scope
+            return False, scope
+        except Exception:
+            return False, scope
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            ok, scope = self._authorized_and_rewritten(scope)
-            if not ok:
-                await send({"type": "http.response.start", "status": 401,
-                            "headers": [(b"content-type", b"text/plain")]})
-                await send({"type": "http.response.body", "body": b"unauthorized"})
-                return
+        stype = scope.get("type")
+        if stype == "lifespan":
+            await self.inner(scope, receive, send)
+            return
+        if stype != "http":                       # websocket etc.: refuse outright
+            if stype == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        ok, scope = self._authorized_and_rewritten(scope)
+        if not ok:
+            await send({"type": "http.response.start", "status": 401,
+                        "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"unauthorized"})
+            return
         await self.inner(scope, receive, send)
 
 

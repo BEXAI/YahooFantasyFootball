@@ -70,35 +70,72 @@ class TokenStore:
         if not self.path.exists():
             raise AuthExpired(
                 f"{self.path} not found — run scripts/yahoo_auth.py first.")
-        self._data = json.loads(self.path.read_text())
+        try:
+            self._data = json.loads(self.path.read_text())
+        except ValueError as e:
+            raise AuthExpired(
+                f"{self.path} is corrupt — re-run scripts/yahoo_auth.py") from e
 
     def get(self, key, default=None):
         return self._data.get(key, default)
 
     def set_and_save(self, **kv):
-        self._data.update(kv)
-        self._save()
+        """Merge kv into the ON-DISK state under the lock — writing the whole
+        in-memory dict could clobber tokens another process just rotated."""
+        with open(self.path.with_suffix(".lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                try:
+                    on_disk = json.loads(self.path.read_text())
+                except (OSError, ValueError):
+                    on_disk = dict(self._data)
+                on_disk.update(kv)
+                self._data = on_disk
+                self._save()
+            finally:
+                fcntl.flock(lk, fcntl.LOCK_UN)
 
     def _save(self):
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2))
-        os.chmod(tmp, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:                       # 0o600 from creation — never world-readable
+            os.write(fd, json.dumps(self._data, indent=2).encode())
+        finally:
+            os.close(fd)
         tmp.replace(self.path)
 
     def access_token(self):
-        if time.time() > float(self._data.get("expires_at", 0)) - 60:
-            self._refresh()
+        if ("access_token" not in self._data
+                or time.time() > float(self._data.get("expires_at", 0)) - 60):
+            self._refresh(force="access_token" not in self._data)
         return self._data["access_token"]
 
-    def _refresh(self):
+    def _refresh(self, force=False):
+        """force=True is the surprise-401 path: the stored expires_at still
+        looks valid, so the freshness early-return must not apply — only the
+        did-another-process-already-rotate check may skip the network call."""
+        prev_token = self._data.get("access_token")
         lock_path = self.path.with_suffix(".lock")
         with open(lock_path, "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
-                # another process may have refreshed while we waited
-                self._data = json.loads(self.path.read_text())
-                if time.time() <= float(self._data.get("expires_at", 0)) - 60:
+                try:
+                    self._data = json.loads(self.path.read_text())
+                except (OSError, ValueError) as e:
+                    raise AuthExpired(
+                        f"{self.path} unreadable — re-run scripts/yahoo_auth.py") from e
+                on_disk_token = self._data.get("access_token")
+                if (not force and on_disk_token
+                        and time.time() <= float(self._data.get("expires_at", 0)) - 60):
                     return
+                if force and prev_token and on_disk_token not in (None, prev_token):
+                    return       # another process already rotated past the dead token
+                missing = [k for k in ("client_id", "client_secret", "refresh_token")
+                           if not self._data.get(k)]
+                if missing:
+                    raise AuthExpired(
+                        f"secrets file incomplete ({', '.join(missing)}) — "
+                        "run scripts/yahoo_auth.py")
                 body = urllib.parse.urlencode({
                     "client_id": self._data["client_id"],
                     "client_secret": self._data["client_secret"],
@@ -195,7 +232,7 @@ class YahooApi:
                 except Exception:
                     pass
                 if e.code == 401 and attempt == 0:
-                    self.tokens._refresh()            # one forced refresh, then retry
+                    self.tokens._refresh(force=True)  # one FORCED refresh, then retry
                     continue
                 if e.code == 401:
                     raise AuthExpired("401 after refresh — re-run scripts/yahoo_auth.py")

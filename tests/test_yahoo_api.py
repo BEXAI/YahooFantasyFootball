@@ -117,6 +117,50 @@ def test_tokenstore_refresh_rejection_is_authexpired(tmp_path, monkeypatch):
         TokenStore(path).access_token()
 
 
+def test_tokenstore_corrupt_file_is_authexpired(tmp_path):
+    p = tmp_path / "yahoo.json"
+    p.write_text("{truncated")
+    with pytest.raises(AuthExpired):
+        TokenStore(p)
+
+
+def test_tokenstore_incomplete_secrets_is_authexpired_not_keyerror(tmp_path):
+    # the exact on-disk state P0.T1 creates before yahoo_auth.py has run
+    p = tmp_path / "yahoo.json"
+    p.write_text(json.dumps({"client_id": "cid", "client_secret": "cs"}))
+    with pytest.raises(AuthExpired):
+        TokenStore(p).access_token()
+
+
+def test_forced_refresh_recovers_from_surprise_401(tmp_path, monkeypatch):
+    """A revoked-but-unexpired token must trigger a REAL refresh, then succeed."""
+    path = _secrets_file(tmp_path, 3000)          # expires_at still looks valid
+    calls = []
+
+    class FakeResp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=0):
+        url = req.full_url
+        calls.append(url)
+        if url.startswith(yahoo_api.TOKEN_URL):
+            return FakeResp(json.dumps({"access_token": "FRESH",
+                                        "refresh_token": "R2",
+                                        "expires_in": 3600}).encode())
+        auth = req.headers.get("Authorization")
+        if auth == "Bearer FRESH":
+            return FakeResp(b'{"ok": true}')
+        raise urllib.error.HTTPError(url, 401, "revoked", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(yahoo_api.urllib.request, "urlopen", fake_urlopen)
+    api = YahooApi(tokens=TokenStore(path))
+    api.team_key = "461.l.9.t.3"
+    assert api._request("/x") == {"ok": True}
+    assert any(u.startswith(yahoo_api.TOKEN_URL) for u in calls), \
+        "401 recovery never contacted the token endpoint"
+
+
 # ---------- request error taxonomy ----------
 
 class FakeTokens:
@@ -124,7 +168,7 @@ class FakeTokens:
     def get(self, k, default=None): return self.d.get(k, default)
     def set_and_save(self, **kv): self.d.update(kv)
     def access_token(self): return "T"
-    def _refresh(self): self.d["refreshed"] = True
+    def _refresh(self, force=False): self.d["refreshed"] = force
 
 
 def _api():
@@ -238,18 +282,28 @@ def test_build_roster_xml_shape_and_escaping():
 
 # ---------- executor dispatcher (plan P2) ----------
 
-def test_write_path_defaults_to_browser():
-    import set_lineup as sl
-    assert sl.CFG.get("write_path", "browser") == "browser"
+def test_write_path_defaults_to_browser_in_template():
+    # assert the TEMPLATE, not the user's live config.json state
+    example = json.loads((ROOT / "config.example.json").read_text())
+    assert example.get("write_path", "browser") == "browser"
 
 
 def test_api_main_missing_secrets_exits_login_required(monkeypatch):
     import set_lineup as sl
+    monkeypatch.setattr(sl, "notify", lambda *a, **k: None)   # no live pushes
     monkeypatch.setattr(yahoo_api, "DEFAULT_SECRETS_PATH",
                         pathlib.Path("/nonexistent/yahoo.json"))
-    with pytest.raises(SystemExit) as e:
-        sl.api_main()
-    assert e.value.code == 2            # LOGIN_REQUIRED contract preserved
-    status = json.loads((ROOT / "logs" / "last_status.json").read_text())
-    assert status["status"] == "LOGIN_REQUIRED"
-    assert "yahoo_auth" in status["summary"]
+    status_file = ROOT / "logs" / "last_status.json"
+    backup = status_file.read_text() if status_file.exists() else None
+    try:
+        with pytest.raises(SystemExit) as e:
+            sl.api_main()
+        assert e.value.code == 2        # LOGIN_REQUIRED contract preserved
+        status = json.loads(status_file.read_text())
+        assert status["status"] == "LOGIN_REQUIRED"
+        assert "yahoo_auth" in status["summary"]
+    finally:                            # never leave test residue in logs/
+        if backup is not None:
+            status_file.write_text(backup)
+        else:
+            status_file.unlink(missing_ok=True)

@@ -19,7 +19,8 @@ from ffl_common import norm_name  # noqa: E402
 def near_lock_window(now=None):
     now = now or datetime.datetime.now()
     wd, hr = now.weekday(), now.hour     # Mon=0 ... Sun=6, local (ET on the Mac)
-    return (wd == 3 and hr >= 17) or (wd == 6 and hr >= 10) or (wd == 0 and hr >= 17)
+    # Sun from 9:00 covers the 9:30 ET international kickoffs
+    return (wd == 3 and hr >= 17) or (wd == 6 and hr >= 9) or (wd == 0 and hr >= 17)
 
 
 def pick_pair(roster):
@@ -58,21 +59,31 @@ def main():
         sys.exit("No benign same-position starter/bench pair available — try another day.")
     print(f"Week {week} proof pair: OUT {st['name']} ({st['slot']}) ↔ IN {bn['name']} (BN)")
 
+    manual_fix = (f"MANUAL RECOVERY: in the Yahoo app move {bn['name']} back to BN "
+                  f"and {st['name']} back to {st['slot']}.")
     confirm("SWAP")
-    api.set_positions([(bn["player_key"], st["slot"]), (st["player_key"], "BN")], week)
-    fresh = api.read_roster(week)
+    try:
+        api.set_positions([(bn["player_key"], st["slot"]), (st["player_key"], "BN")], week)
+        fresh = api.read_roster(week)
+    except yahoo_api.YahooApiError as e:
+        sys.exit(f"API error during swap ({type(e).__name__}: {e}). "
+                 f"State uncertain — check the Yahoo app. {manual_fix}")
     ok = slot_of(fresh, bn["name"]) == st["slot"] and slot_of(fresh, st["name"]) == "BN"
     print(f"swap applied+verified: {ok}")
     if not ok:
-        sys.exit("VERIFY FAILED after swap — inspect the Yahoo app, revert manually if needed.")
+        sys.exit(f"VERIFY FAILED after swap. {manual_fix}")
 
     confirm("REVERT")
-    api.set_positions([(st["player_key"], st["slot"]), (bn["player_key"], "BN")], week)
-    fresh = api.read_roster(week)
+    try:
+        api.set_positions([(st["player_key"], st["slot"]), (bn["player_key"], "BN")], week)
+        fresh = api.read_roster(week)
+    except yahoo_api.YahooApiError as e:
+        sys.exit(f"API error during revert ({type(e).__name__}: {e}). "
+                 f"THE LINEUP IS CURRENTLY SWAPPED — {manual_fix}")
     ok = slot_of(fresh, st["name"]) == st["slot"] and slot_of(fresh, bn["name"]) == "BN"
     print(f"revert applied+verified: {ok}")
     if not ok:
-        sys.exit("VERIFY FAILED after revert — fix in the Yahoo app before relying on this.")
+        sys.exit(f"VERIFY FAILED after revert — THE LINEUP MAY STILL BE SWAPPED. {manual_fix}")
 
     print("\nWRITE PROOF PASSED (gate G0). Record the run in docs/api_notes.md:")
     print("  - the exact XML accepted (yahoo_api.build_roster_xml shape)")

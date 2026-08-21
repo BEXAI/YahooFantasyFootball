@@ -59,8 +59,14 @@ def main():
             "access_token": tok["access_token"],
             "refresh_token": tok["refresh_token"],
             "expires_at": time.time() + int(tok.get("expires_in", 3600))}
-    path.write_text(json.dumps(data, indent=2))
-    os.chmod(path, 0o600)
+    # 0o600 from creation, atomic replace — never world-readable, never truncated
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(data, indent=2).encode())
+    finally:
+        os.close(fd)
+    tmp.replace(path)
     print(f"\nSaved {path} (chmod 600).")
     print(f"refresh_token ends with ...{tok['refresh_token'][-6:]} — never commit this file.")
     print("Next: .venv/bin/python scripts/yahoo_probe.py")

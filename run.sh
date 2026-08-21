@@ -35,7 +35,8 @@ CODE=$?
 if [ $CODE -eq 0 ]; then curl -fsS -m 10 "$HC" >/dev/null || true
 else curl -fsS -m 10 "$HC/fail" >/dev/null || true; fi
 
-# Keep last 30 logs / 40 screenshots
+# Keep last 30 logs / 40 screenshots / 40 api evidence files
 ls -1t logs/run_*.log 2>/dev/null | tail -n +31 | xargs -I{} rm -f {}
 ls -1t screenshots/*.png 2>/dev/null | tail -n +41 | xargs -I{} rm -f {}
+ls -1t logs/api_roster_*.json 2>/dev/null | tail -n +41 | xargs -I{} rm -f {}
 exit $CODE

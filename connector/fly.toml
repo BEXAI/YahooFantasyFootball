@@ -3,15 +3,13 @@
 #   fly secrets set CONNECTOR_TOKEN=<long random string>
 #   fly secrets set YAHOO_SECRETS_B64=$(base64 -i ~/.ffl-secrets/yahoo.json)
 #   fly deploy --dockerfile connector/Dockerfile
-# The release command below materializes the secrets file from the b64 secret.
+# Secrets materialize at container start (Dockerfile CMD) — a release_command
+# would run on a throwaway machine whose filesystem never reaches app machines.
 app = "ffl-yahoo-connector"
 primary_region = "mia"
 
 [build]
   dockerfile = "connector/Dockerfile"
-
-[deploy]
-  release_command = "sh -c 'mkdir -p /secrets && echo $YAHOO_SECRETS_B64 | base64 -d > /secrets/yahoo.json'"
 
 [http_service]
   internal_port = 8080
