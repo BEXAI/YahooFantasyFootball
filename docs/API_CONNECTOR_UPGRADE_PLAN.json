@@ -1,0 +1,162 @@
+{
+  "plan_id": "ffl-yahoo-api-connector-upgrade-v1",
+  "format_version": "1.0",
+  "created": "2026-08-21",
+  "repository": "https://github.com/BEXAI/YahooFantasyFootball",
+  "audience": "An AI LLM coding agent executing this plan task-by-task, with a human (the repo owner, 'Nathaniel') available at marked decision gates only.",
+  "objective": "Upgrade the FFL Agent from browser-automation writes and blind research to: (1) a Yahoo Fantasy Sports API client with OAuth2 fspt-w write access replacing the fragile Playwright write path, and (2) a custom Claude connector (remote MCP server) giving the research Routines and the owner's phone live roster/projection/matchup data. Every existing guarantee (guardrails, fallback chain, fail-safe degradation) must survive unchanged.",
+
+  "context": {
+    "current_system": {
+      "summary": "A lid-closed MacBook runs launchd->run.sh->set_lineup.py (headless Playwright) Thu 17:30 / Sun 10:30 ET. set_lineup.py: READ (parse Yahoo roster DOM) -> DECIDE (manual lineup.json > fresh Routine advice from advice_remote.json > greedy optimizer) -> WRITE (Yahoo Swap Mode clicks) -> VERIFY (re-parse) -> REPORT (logs/last_status.json + ntfy push; healthchecks dead-man ping in run.sh). Two Claude Code Routines (Thu 20:00 / Sun 13:00 UTC) fire into the persistent operator session, research the slate, and commit advice/lineup.json to main; run.sh extracts it merge-free via git fetch + git show.",
+      "key_files": ["set_lineup.py", "run.sh", "seed_login.py", "config.example.json", "roster.json", "league_settings.json", "advice/lineup.json", "docs/ROUTINE_PROMPT.md", "docs/ENHANCEMENT_PLAN.md", "tests/test_decide.py", "launchd/*.plist", "install.sh", "arm.sh", "smoke_test.sh", "teardown.sh"],
+      "decide_contract": "decide(roster) -> (swaps, source, override_skipped); source in {manual, advice, optimizer}; swaps are (out_name, in_name, slot, gain) tuples; build_override_swaps enforces: normalized unique name match, swap-in currently on bench, startable (not BYE and status not in bad_statuses), not locked, slot-eligible, each player in at most one swap, rejected entries reported with reasons.",
+      "report_contract": "finish(status, extra, exit_code): status in {SUCCESS, NO_CHANGE, PARTIAL, LOGIN_REQUIRED, ERROR}; exit codes 0/2/3/4; writes logs/last_status.json; ntfy push. DRY_RUN=1 and a PAUSED file both suppress all writes but still report planned swaps.",
+      "test_suite": "tests/test_decide.py — 60 browser-free tests; CI (.github/workflows/tests.yml) runs pytest + bash -n on every push. The suite MUST stay green after every task.",
+      "known_limitations_this_plan_fixes": [
+        "Routines cannot see current slot assignments (roster.json lists players, not starters) — advice is framed as start-X-over-Y guesses",
+        "roster.json is hand-maintained and drifts after add/drops",
+        "Projections come from web search, not Yahoo's own numbers",
+        "The Playwright write path depends on 3 unpinned DOM selectors, a persistent cookie profile, a residential IP, and an always-awake lid-closed Mac"
+      ]
+    },
+    "research_findings": {
+      "yahoo_api": "Yahoo Fantasy Sports API (fantasysports.yahooapis.com/fantasy/v2) supports OAuth 2.0 with scopes fspt-r (read) and fspt-w (read/write). Write ops: PUT /team/{team_key}/roster with an XML body changes player positions; POST to league transactions does add/drop (FORBIDDEN in this system, see non_negotiables). Developer apps are created free at developer.yahoo.com with Fantasy Sports Read or Read/Write permission. Access tokens expire ~1h; refresh tokens are long-lived (grant_type=refresh_token at https://api.login.yahoo.com/oauth2/get_token).",
+      "custom_connectors": "claude.ai custom connectors are remote MCP servers: publicly reachable HTTPS (Claude connects from Anthropic's cloud), streamable HTTP transport, optional OAuth (client id/secret under Advanced Settings) or bearer/no-auth. Added at Settings -> Connectors -> + -> Add custom connector. Available on the owner's plan.",
+      "prior_art": [
+        {"repo": "https://github.com/derekrbreese/fantasy-football-mcp-public", "notes": "12 tools (ff_get_leagues/roster/matchup/waiver_wire/build_lineup/refresh_token...); stdio transport for Claude Desktop; Yahoo OAuth via consumer key/secret + helper auth scripts. Reference implementation — CHECK LICENSE before copying code."},
+        {"repo": "https://github.com/spilchen/yahoo_fantasy_mcp", "notes": "Thin MCP front-end for the python yahoo_fantasy_api library."},
+        {"repo": "https://github.com/carterfawson/fantasy-football-mcp", "notes": "Fork claiming roster management + waiver functionality."}
+      ],
+      "verified_environment_constraints": [
+        "The Claude cloud environment's egress proxy blocks arbitrary hosts (ntfy.sh confirmed blocked) — any cloud-side executor idea must first prove healthchecks/ntfy reachability; do not assume it.",
+        "Trigger-fired fresh sessions cannot complete git pushes (held for review); Routines therefore fire into the persistent operator session — do not change that without re-validating a smoke push."
+      ]
+    }
+  },
+
+  "non_negotiables": [
+    "N1: Position swaps only. The API client and MCP server must contain NO code path that calls Yahoo transaction endpoints (add/drop/trade/waiver claims). A unit test greps the client source for '/transactions' and fails if present.",
+    "N2: Never start BYE/OUT/IR/SUSP players; never move a locked player; min_swap_gain threshold for healthy-starter upgrades; each player in at most one swap. The existing decide()/build_override_swaps logic is the single source of these rules — the API write path consumes its output, never reimplements decision logic.",
+    "N3: DRY_RUN=1 and PAUSED must suppress API writes exactly as they suppress browser writes today.",
+    "N4: Fail-safe chain preserved: connector down -> Routine falls back to web research + roster.json; advice absent/stale/garbage -> optimizer; API write path failing -> report PARTIAL/error with the same finish() contract (and, during transition, the browser path remains selectable via config).",
+    "N5: Secrets (Yahoo client id/secret, access/refresh tokens, connector bearer token) never enter the repository, its history, test fixtures, logs, or last_status.json. Storage: ~/.ffl-secrets/yahoo.json chmod 600 on the Mac; the hosting platform's secret store for the connector.",
+    "N6: Every existing test stays green after every task; new behavior ships with new tests; nothing is pushed with a failing suite.",
+    "N7: The verify-then-report discipline survives: after any API write, re-read the roster from the API and confirm the change before counting it done.",
+    "N8: The MCP server's write tool (ff_set_lineup) ships disabled (ENABLE_WRITES=false), requires an explicit confirm=true argument when enabled, and applies the same N2 validation server-side."
+  ],
+
+  "decision_gates": [
+    {"gate": "G0", "after_task": "P0.T4", "question": "Did the fspt-w write proof succeed on the real league? If Yahoo denied Read/Write at app creation or the PUT fails with a scope error, STOP: execute only P3-read-only + P4 (connector without writes) and skip P2/P5.", "decider": "human"},
+    {"gate": "G1", "after_task": "P2.T5", "question": "Two consecutive scheduled game windows completed cleanly on write_path=api? Only then flip the default and schedule browser-path removal.", "decider": "human"},
+    {"gate": "G2", "after_task": "P3.T6", "question": "Choose connector hosting (Fly.io / Render / Cloudflare Workers port) and confirm monthly cost is acceptable before deploy.", "decider": "human"},
+    {"gate": "G3", "after_task": "P4.T4", "question": "Enable ff_set_lineup writes on the connector? Default is read-only forever unless explicitly wanted.", "decider": "human"}
+  ],
+
+  "phases": [
+    {
+      "id": "P0",
+      "name": "Yahoo developer app + write proof",
+      "goal": "Prove, with the owner's real league, that OAuth2 fspt-w lineup writes work — before building anything on the assumption.",
+      "blocking": "All later phases depend on P0 (P3 read-only tools depend only on P0.T1-T3).",
+      "tasks": [
+        {"id": "P0.T1", "type": "human", "title": "Create the Yahoo developer app", "description": "At https://developer.yahoo.com/apps/create/ create an app: API Permissions -> Fantasy Sports -> Read/Write; redirect URI https://localhost:8080 (Yahoo requires https; the code is copied manually from the redirected URL). Record Client ID (Consumer Key) and Client Secret into ~/.ffl-secrets/yahoo.json.", "acceptance": "App exists with Fantasy Sports Read/Write listed; if only Read is grantable, record that fact for gate G0."},
+        {"id": "P0.T2", "type": "code", "title": "scripts/yahoo_auth.py — one-time OAuth bootstrap", "files": ["scripts/yahoo_auth.py"], "description": "Authorization-code flow: print the request_auth URL (https://api.login.yahoo.com/oauth2/request_auth?client_id=...&redirect_uri=...&response_type=code), prompt for the pasted code, exchange at https://api.login.yahoo.com/oauth2/get_token, then write access_token/refresh_token/expires_at into ~/.ffl-secrets/yahoo.json (chmod 600). Stdlib urllib only (no new runtime deps for the Mac).", "acceptance": "Running it interactively produces a secrets file; a follow-up refresh call (grant_type=refresh_token) returns a new access token."},
+        {"id": "P0.T3", "type": "code", "title": "scripts/yahoo_probe.py — discover team + dump roster payload", "files": ["scripts/yahoo_probe.py", "tests/fixtures/roster_sample.json"], "description": "GET /users;use_login=1/games;game_keys=nfl/teams?format=json to find team_key; GET /team/{team_key}/roster/players?format=json (and .../players;out=stats for projected points). Print a normalized table: name, selected_position, eligible_positions, status, bye, editability flags, projected points if present. Save ONE sanitized payload (players may keep names; strip all tokens/guids) as a test fixture.", "acceptance": "Probe prints the real roster with slot assignments; fixture committed; a NOTES section in the script's output records which fields actually carry: locked/editable state, bye weeks, projected points — these are UNKNOWNS this task exists to resolve."},
+        {"id": "P0.T4", "type": "verify", "title": "scripts/yahoo_write_proof.py — supervised benign write + revert", "files": ["scripts/yahoo_write_proof.py"], "description": "With the human watching: pick two same-position players (one BN, one starter) from the probe, PUT the swapped positions as XML to /team/{team_key}/roster (coverage_type=week, current week), re-GET to confirm, then PUT the original positions back and confirm the revert. Refuse to run within 3h of any lock time.", "acceptance": "Both PUTs return 2xx and the re-GETs reflect each state. Record the exact XML shape that worked in docs/api_notes.md (no secrets).", "gate_after": "G0"}
+      ]
+    },
+    {
+      "id": "P1",
+      "name": "Yahoo API client module",
+      "goal": "A reusable, tested yahoo_api.py that the executor, scripts, and MCP server all share.",
+      "tasks": [
+        {"id": "P1.T1", "type": "code", "title": "yahoo_api.py — token manager + reads", "files": ["yahoo_api.py"], "description": "TokenStore(path=~/.ffl-secrets/yahoo.json, env override YAHOO_SECRETS_PATH for the connector): auto-refresh when <60s to expiry, persist rotated tokens, tolerate concurrent refresh with a lockfile. read_roster(week=None) -> list of player dicts in EXACTLY the executor's shape: {name, slot, primary, status, bye, proj, locked} — mapping from the fields P0.T3 verified (slot from selected_position incl. 'W/R/T'/'BN'/'IR'; primary from primary/display position; status from Yahoo status; bye by comparing bye_weeks to current week; proj from projected stats if available ELSE 0.0 with a module-level flag proj_available=False; locked from the editability field P0.T3 identified). Also read_matchup(), read_free_agents(position) for the connector.", "acceptance": "Unit tests against the P0.T3 fixture verify every field mapping; test asserts '/transactions' absent from source (N1)."},
+        {"id": "P1.T2", "type": "code", "title": "yahoo_api.py — set_positions writer", "files": ["yahoo_api.py"], "description": "set_positions(changes: list[(player_key, new_position)], week) builds the exact XML shape recorded in docs/api_notes.md and PUTs it. Error taxonomy mapped to executor semantics: 401 after one refresh attempt -> AuthExpired (executor exit 2 path); per-player locked/ineligible errors -> LockedError (skipped reporting); HTTP 999/429 -> backoff retry (2s/4s/8s, then fail).", "acceptance": "Unit tests cover XML construction, error mapping (mocked HTTP), and the N1 grep test still passes."},
+        {"id": "P1.T3", "type": "code", "title": "Name-to-player_key resolution", "files": ["yahoo_api.py", "tests/test_yahoo_api.py"], "description": "The decide() layer speaks player NAMES; the API speaks player_keys. Add resolve(swaps, roster_payload) using the existing norm_name/roster_index functions imported from set_lineup (or moved to a shared module ffl_common.py if circular imports arise) — ambiguity skips, never guesses, consistent with N2.", "acceptance": "Tests: exact, normalized, and ambiguous name cases."}
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "Executor v2 — API write path",
+      "goal": "set_lineup.py can run entirely over the API (read + write + verify), selected by config; browser path remains the fallback until gate G1.",
+      "tasks": [
+        {"id": "P2.T1", "type": "code", "title": "config: write_path switch", "files": ["config.example.json", "set_lineup.py"], "description": "Add \"write_path\": \"browser\" (default). Values: browser | api. CFG.get with 'browser' default so existing configs keep working.", "acceptance": "Existing tests green; new test for default."},
+        {"id": "P2.T2", "type": "code", "title": "API read+write+verify branch in set_lineup.py", "files": ["set_lineup.py"], "description": "When write_path=api: READ roster via yahoo_api.read_roster() (no browser launch at all); decide() unchanged; DRY_RUN/PAUSED report planned swaps and exit exactly as today (N3); WRITE via set_positions (batch all swaps into ONE PUT — position changes are a single roster document); VERIFY by re-reading the roster and confirming every swap landed (N7); report with the same finish() statuses/exit codes, including per-swap skipped reasons for locked/failed entries. AuthExpired maps to LOGIN_REQUIRED/exit 2 with a message pointing at scripts/yahoo_auth.py instead of seed_login.py.", "acceptance": "New unit tests for the api branch with a mocked yahoo_api; all prior tests green; pyflakes clean."},
+        {"id": "P2.T3", "type": "code", "title": "run.sh + docs", "files": ["run.sh", "README.md"], "description": "run.sh needs no functional change (advice fetch, sentinel, healthchecks stay); README gains a 'Write paths' section: browser vs api, the switch, the new LOGIN_REQUIRED meaning per path, and the note that the api path needs no residential IP, no cookie profile, and no DOM pinning.", "acceptance": "bash -n clean; README statements match code."},
+        {"id": "P2.T4", "type": "verify", "title": "Supervised live API run (lid open)", "description": "Human watches: write_path=api, real roster, a real benign swap window. Confirm last_status.json SUCCESS, Yahoo app reflects it, ntfy push arrives.", "acceptance": "One clean live api-path run."},
+        {"id": "P2.T5", "type": "verify", "title": "Two scheduled windows on api path", "description": "Set write_path=api in the Mac's config.json for two consecutive scheduled runs (Thu+Sun). Watch healthchecks + last_status.json.", "acceptance": "Two clean windows.", "gate_after": "G1"}
+      ]
+    },
+    {
+      "id": "P3",
+      "name": "Custom Claude connector (remote MCP server)",
+      "goal": "A hosted streamable-HTTP MCP server wrapping yahoo_api.py, addable at claude.ai Settings -> Connectors -> +.",
+      "tasks": [
+        {"id": "P3.T1", "type": "human", "title": "License check on prior art", "description": "Check the LICENSE of derekrbreese/fantasy-football-mcp-public (and any repo whose code is borrowed). If permissive (MIT/Apache), patterns and code may be adapted with attribution; if absent/restrictive, implement clean-room from the Yahoo API docs + our own yahoo_api.py.", "acceptance": "License decision recorded in connector/README.md."},
+        {"id": "P3.T2", "type": "code", "title": "connector/ server skeleton", "files": ["connector/server.py", "connector/requirements.txt", "connector/README.md"], "description": "Python MCP SDK (FastMCP), streamable HTTP transport, bearer-token auth middleware (token from env CONNECTOR_TOKEN; reject requests without it). Reuses yahoo_api.py (import path or package the module). Health endpoint for the host's checks.", "acceptance": "Local run + MCP inspector (or raw JSON-RPC initialize/tools-list via curl) shows the server and tools."},
+        {"id": "P3.T3", "type": "code", "title": "Read tools", "files": ["connector/server.py"], "description": "Tools with typed schemas and docstrings written for an LLM consumer: ff_get_roster (live slots + statuses + projections + locked flags), ff_get_matchup (opponent, scores, projections), ff_get_free_agents (position-filtered), ff_get_league_settings. Responses compact JSON; no secrets or tokens ever in outputs.", "acceptance": "Each tool returns correct data against the live league in a local test run."},
+        {"id": "P3.T4", "type": "code", "title": "ff_set_lineup (gated write tool)", "files": ["connector/server.py"], "description": "Input {swaps: [{out, in}], confirm: bool}. Refuses unless ENABLE_WRITES=true env AND confirm=true. Validates via the same shared logic (N2/N8): startable, unlocked, bench-origin, eligible, unique names, one swap per player. Applies via set_positions; re-reads to verify; returns applied/skipped-with-reasons.", "acceptance": "With ENABLE_WRITES unset, the tool always refuses (test). With it set, a supervised local call applies+verifies a benign swap."},
+        {"id": "P3.T5", "type": "code", "title": "Deploy artifacts", "files": ["connector/Dockerfile", "connector/fly.toml"], "description": "Containerize; document deploy for the G2-chosen host; secrets (Yahoo file contents + CONNECTOR_TOKEN) via the platform secret store, mounted/env-injected, never baked into the image.", "acceptance": "Image builds; docs complete."},
+        {"id": "P3.T6", "type": "deploy", "title": "Deploy + smoke", "description": "Deploy to the chosen host; verify public HTTPS reachability and an end-to-end tools/list + ff_get_roster call with the bearer token.", "acceptance": "Public URL serving MCP with auth.", "gate_after": "G2"}
+      ]
+    },
+    {
+      "id": "P4",
+      "name": "Wire the connector into claude.ai and the Routines",
+      "goal": "The research Routines and the owner's phone use live Yahoo data.",
+      "tasks": [
+        {"id": "P4.T1", "type": "human", "title": "Add the custom connector", "description": "claude.ai (or iOS app) Settings -> Connectors -> + -> Add custom connector -> the P3.T6 URL; bearer token under Advanced Settings. Verify tools appear in a normal chat ('what's my roster?').", "acceptance": "Connector listed next to Gmail/Drive/etc. and callable from chat."},
+        {"id": "P4.T2", "type": "code", "title": "Recreate the two Routines carrying the connector", "description": "From a session that holds the connector (the operator session after reconnect, or the claude.ai Routines UI): delete trig-Thursday/trig-Sunday and recreate with identical crons/persistent binding PLUS connectors:[\"<connector name>\"]. Keep the persistent-session delivery model (see verified_environment_constraints).", "acceptance": "list_triggers shows both with the connector grant; a manual fire can call ff_get_roster."},
+        {"id": "P4.T3", "type": "code", "title": "ROUTINE_PROMPT.md v2", "files": ["docs/ROUTINE_PROMPT.md"], "description": "Rewrite inputs: PRIMARY = connector tools (live roster incl. slot assignments — the start-X-over-Y guessing rule is deleted; advice may now reference exact current starters), Yahoo projections, matchup context; SECONDARY = web research for injuries/news/weather; FALLBACK = roster.json + league_settings.json when the connector is unavailable (files stay in the repo, demoted). Advice output contract (advice/lineup.json schema, freshness, commit-to-main) is UNCHANGED so the executor needs no modification. SMOKE MODE trigger becomes 'connector unavailable AND roster.json placeholder'.", "acceptance": "Prompt internally consistent; executor contract untouched; docs/ENHANCEMENT_PLAN.md appended with a v2 note."},
+        {"id": "P4.T4", "type": "verify", "title": "Smoke-fire a Routine with the connector", "description": "fire_trigger the Thursday Routine; confirm it reads the LIVE roster via the connector, produces advice naming actual current starters, and commits to main.", "acceptance": "Advice commit on main whose entries match live slot reality.", "gate_after": "G3"}
+      ]
+    },
+    {
+      "id": "P5",
+      "name": "Transition and decommission (gated, optional)",
+      "goal": "Retire the fragile layers the API makes unnecessary — only after G1 proves the api path.",
+      "tasks": [
+        {"id": "P5.T1", "type": "code", "title": "Flip the default write path", "files": ["config.example.json", "README.md"], "description": "write_path default becomes 'api'; browser path stays selectable. seed_login.py/profile/ documented as legacy-fallback-only.", "acceptance": "Docs + example config consistent; suite green."},
+        {"id": "P5.T2", "type": "human", "title": "Mac posture decision", "description": "The api path needs no browser, no residential IP, no cookie profile — the Mac remains only as the SCHEDULER (launchd) and secrets holder. Options: (a) keep Mac as-is (lowest risk; pmset/launchd unchanged); (b) investigate a cloud executor Routine at lock-minus-40min — ONLY viable if the cloud env's egress proxy permits hc-ping.com/ntfy.sh or an alternative notification path (KNOWN: ntfy.sh is blocked; verify before committing to (b)).", "acceptance": "Decision recorded in docs/ENHANCEMENT_PLAN.md."},
+        {"id": "P5.T3", "type": "code", "title": "Retire browser-path code (optional, 4+ weeks after G1)", "description": "If the owner chooses: remove Playwright dependency, seed_login.py, DOM-contract code, and the browser branch; simplify tests; update README/teardown. Keep git history as the archive.", "acceptance": "Suite green; README describes the API-only system."}
+      ]
+    }
+  ],
+
+  "risks": [
+    {"risk": "Yahoo denies Read/Write permission at app creation", "mitigation": "Gate G0 catches it in the first hour; plan degrades to read-only connector (research-layer upgrade only), executor keeps the browser path."},
+    {"risk": "Projected points not exposed by the API", "mitigation": "P0.T3 resolves it empirically; proj falls back to 0.0 which makes the optimizer pass-1-only (safe: it still fixes BYE/OUT), and advice/web research carries projections."},
+    {"risk": "Locked/editability semantics differ from DOM behavior", "mitigation": "P0.T3 records the real field; P1.T2 maps per-player lock errors to skipped-reporting; N7 verify catches anything that slips."},
+    {"risk": "Yahoo invalidates the refresh token mid-season", "mitigation": "AuthExpired -> LOGIN_REQUIRED/exit 2 + urgent ntfy, same recovery UX as today (run scripts/yahoo_auth.py once, lid open)."},
+    {"risk": "Connector host outage before a lock", "mitigation": "Routines fall back to web research + roster.json (P4.T3); executor never depends on the connector at all."},
+    {"risk": "Secrets leakage via fixtures/logs/connector output", "mitigation": "N5 + P0.T3 sanitization + a repo-wide secret-pattern grep test added in P1."},
+    {"risk": "Public repo leaks strategy (existing)", "mitigation": "Unchanged from current system: consider making the repo private; api path removes the Mac's anonymous-fetch constraint since git fetch can carry a PAT."}
+  ],
+
+  "llm_execution_protocol": {
+    "workflow": [
+      "Work on branch claude/yahoo-fantasy-football-system-eyytqg; after each pushed commit, fast-forward main (git checkout main && git merge --ff-only <branch> && git push) and return to the branch — the Routines and the Mac read main.",
+      "Execute tasks in order; respect depends_on/blocking; STOP at every decision_gate and ask the human.",
+      "Before every push: pytest tests/ (all green), pyflakes on changed python, bash -n on changed shell. Never fabricate acceptance — paste real command output when reporting.",
+      "Never commit: tokens, client secrets, ~/.ffl-secrets contents, unsanitized API payloads, .env files. Add new runtime state files to .gitignore ROOT-ANCHORED (see .gitignore header comment for why).",
+      "Commit style: imperative summary + body explaining WHY; no model names in commits.",
+      "Mac-side tasks (P0.T4, P2.T4/T5) run on the owner's MacBook, not the cloud — prepare the scripts and exact commands, then hand off to the human.",
+      "If any Yahoo API reality contradicts this plan (field names, XML shape, scope behavior), trust the live API, update docs/api_notes.md, and adjust the plan file in the same commit."
+    ],
+    "definition_of_done": "G1 passed with write_path=api default (or G0-degraded read-only scope completed); connector live in the owner's Connectors list; both Routines carrying the connector and producing slot-accurate advice; full test suite green; README/ENHANCEMENT_PLAN updated to describe the shipped architecture."
+  },
+
+  "references": [
+    "https://developer.yahoo.com/fantasysports/guide/",
+    "https://developer.yahoo.com/oauth2/guide/",
+    "https://developer.yahoo.com/oauth2/guide/flows_authcode/",
+    "https://support.anthropic.com/en/articles/11503834-building-custom-connectors-via-remote-mcp-servers",
+    "https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp",
+    "https://github.com/derekrbreese/fantasy-football-mcp-public",
+    "https://github.com/spilchen/yahoo_fantasy_mcp",
+    "https://github.com/carterfawson/fantasy-football-mcp",
+    "https://yahoo-fantasy-api.readthedocs.io/en/latest/yahoo_fantasy_api.html",
+    "https://github.com/whatadewitt/yahoo-fantasy-sports-api"
+  ]
+}

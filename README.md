@@ -144,7 +144,7 @@ Work through these in order; each step ends with an acceptance check. Steps 1–
 ### Step 1 — Clone and install (lid open)
 
 ```bash
-git clone https://github.com/BEXAI/YahooFantassyFootball ~/ffl-agent
+git clone https://github.com/BEXAI/YahooFantasyFootball ~/ffl-agent
 cd ~/ffl-agent
 ./install.sh        # venv + Playwright Chromium + creates config.json from template
 ```
