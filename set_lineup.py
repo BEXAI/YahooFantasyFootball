@@ -193,27 +193,8 @@ def load_advice():
     return _valid_swap_list(data)
 
 
-_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
-
-
-def norm_name(s):
-    """Match names across renderings: 'D.J. Moore' == 'DJ Moore', drop Jr/III etc.
-    Total over any input: a non-string (LLM-generated advice can carry wrong
-    types) normalizes to "" and simply never matches — it must not crash."""
-    if not isinstance(s, str):
-        return ""
-    s = re.sub(r"[^a-z0-9 ]", "", s.casefold())
-    return " ".join(p for p in s.split() if p not in _SUFFIXES)
-
-
-def roster_index(roster):
-    """normalized name -> player; a normalized-name collision maps to None so an
-    ambiguous override entry is skipped, never guessed."""
-    idx = {}
-    for p in roster:
-        k = norm_name(p["name"])
-        idx[k] = None if k in idx else p
-    return idx
+# Name matching lives in ffl_common so the API client and connector share it.
+from ffl_common import norm_name, roster_index  # noqa: E402  (re-exported for tests)
 
 
 def build_override_swaps(roster, entries):
@@ -362,8 +343,8 @@ def execute(page, swaps):
     return done, skipped
 
 
-# ---------- main ----------
-def main():
+# ---------- main: browser write path ----------
+def browser_main():
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
             str(ROOT / "profile"), headless=True,
@@ -412,6 +393,81 @@ def main():
     else:
         finish("PARTIAL", {"summary": f"no swaps applied | skipped: "
                                       f"{'; '.join(skipped)}{osk_txt}", **extra}, 3)
+
+
+# ---------- main: API write path (plan P2 — no browser at all) ----------
+def api_main():
+    import yahoo_api
+    try:
+        api = yahoo_api.YahooApi()
+        roster = api.read_roster()
+    except yahoo_api.AuthExpired as e:
+        finish("LOGIN_REQUIRED",
+               {"summary": f"Yahoo OAuth expired ({e}). Zero changes made. "
+                           "Re-run scripts/yahoo_auth.py to re-authorize."}, 2)
+    except yahoo_api.YahooApiError as e:
+        finish("ERROR", {"summary": f"Yahoo API read failed: {e}"}, 4)
+    if not roster:
+        finish("ERROR", {"summary": "API roster returned 0 players"}, 4)
+    (ROOT / "logs" / f"api_roster_before_{TS}.json").write_text(json.dumps(roster, indent=1))
+
+    swaps, source, osk = decide(roster)
+    osk_txt = f" | override skipped: {'; '.join(osk)}" if osk else ""
+    extra = {"source": source, "write_path": "api",
+             **({"override_skipped": osk} if osk else {})}
+
+    if not swaps:
+        finish("NO_CHANGE", {"summary": f"lineup already optimal ({source}){osk_txt}",
+                             **extra}, 0)
+    plan_txt = "; ".join(f"{s[2]}: {s[0]}→{s[1]} (+{s[3]})" for s in swaps)
+    if DRY_RUN or PAUSED:
+        tag = "DRY" if DRY_RUN else "PAUSED"
+        finish("NO_CHANGE", {"summary": f"[{tag}] planned: {plan_txt}{osk_txt}",
+                             "planned": plan_txt, **extra}, 0)
+
+    applied, skipped = [], []
+    week = api.current_week
+    for (out_name, in_name, slot, gain) in swaps:
+        try:
+            changes = yahoo_api.changes_for_swap(out_name, in_name, slot, roster)
+            api.set_positions(changes, week)
+            applied.append((out_name, in_name, slot, gain))
+        except yahoo_api.LockedError:
+            skipped.append(f"{slot}: {out_name}→{in_name} (locked)")
+        except KeyError:
+            skipped.append(f"{slot}: {out_name}→{in_name} (no unique roster match)")
+        except yahoo_api.YahooApiError as e:
+            skipped.append(f"{slot}: {out_name}→{in_name} (api-error: {type(e).__name__})")
+
+    # verify-then-report (plan N7): the re-read is the authoritative record
+    done = []
+    try:
+        fresh = api.read_roster(week)
+        (ROOT / "logs" / f"api_roster_after_{TS}.json").write_text(json.dumps(fresh, indent=1))
+        by = {p["name"]: p for p in fresh}
+        for (out_name, in_name, slot, gain) in applied:
+            if by.get(in_name, {}).get("slot") == slot:
+                done.append(f"{slot}: {out_name} → {in_name} (+{gain})")
+            else:
+                skipped.append(f"{slot}: {out_name}→{in_name} (verify failed)")
+    except yahoo_api.YahooApiError:
+        skipped.extend(f"{s[2]}: {s[0]}→{s[1]} (verify unavailable)" for s in applied)
+
+    if done and not skipped:
+        finish("SUCCESS", {"summary": f"{'; '.join(done)}{osk_txt}", **extra}, 0)
+    elif done:
+        finish("PARTIAL", {"summary": f"done: {'; '.join(done)} | skipped: "
+                                      f"{'; '.join(skipped)}{osk_txt}", **extra}, 0)
+    else:
+        finish("PARTIAL", {"summary": f"no swaps applied | skipped: "
+                                      f"{'; '.join(skipped)}{osk_txt}", **extra}, 3)
+
+
+def main():
+    if CFG.get("write_path", "browser") == "api":
+        api_main()
+    else:
+        browser_main()
 
 
 if __name__ == "__main__":

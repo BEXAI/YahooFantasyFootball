@@ -61,6 +61,9 @@ MacBook (Apple Silicon · AC power · lid CLOSED · pmset disablesleep=1)
 | `set_lineup.py` | The agent — the five stages in the diagram. Everything below (§1.3–§1.6) is its contract. |
 | `seed_login.py` | One-time, lid-open, **headed** login that seeds `./profile` (persistent Chromium cookies). The agent never touches credentials — it only reuses this profile. |
 | `install.sh` / `arm.sh` / `smoke_test.sh` / `teardown.sh` | Setup, arming, lid-closed smoke test, and full revert — used in §2. |
+| `yahoo_api.py` + `ffl_common.py` | Yahoo Fantasy API client (OAuth2 reads + position-only lineup writes) and the shared name-matching helpers — used by the api write path, the `scripts/` tooling, and the connector. |
+| `scripts/` | `yahoo_auth.py` (one-time OAuth bootstrap), `yahoo_probe.py` (roster dump + unknown-field resolution), `yahoo_write_proof.py` (supervised benign write+revert — gate G0). |
+| `connector/` | Custom Claude connector: remote MCP server (streamable HTTP, bearer auth) exposing live roster/matchup/free-agent tools; write tool disabled by default. See `connector/README.md`. |
 | `roster.json` | Your roster, names exactly as Yahoo renders them — the research Routines' input; edit after every add/drop. |
 | `league_settings.json` | Slots/eligibility/scoring for the Routines (`config.json` is gitignored so the cloud can't read it; keep the two eligibility maps in sync). |
 | `advice/` | Routine-committed `lineup.json` + `history/` rationale archive — the data channel and season memory (see §1.5b). |
@@ -116,6 +119,10 @@ This is deliberately not a global optimum search — it is a conservative, expla
 Writes use Yahoo's **Swap Mode**: click the starter's slot control, then click the highlighted bench player. After every swap the roster is **re-parsed and the swap confirmed** before continuing; after any failure (timeout, verify miss) the page is hard-reloaded so a dangling selection can never turn the next click into an unplanned write, and each swap is preceded by a pre-check that the outgoing starter still holds the planned slot. Before/after full-page PNGs are kept for every run.
 
 > **DOM contract:** three selectors are deliberately loose and tagged `Phase 2: pin` in `set_lineup.py` — the projected-points column index, the slot-control locator, and lock detection. They MUST be pinned against your live roster page (step 5 in §2) before any live write. Everything else is behavior, not guesswork.
+
+### 1.5a Write paths: browser (default) vs api
+
+`config.json` `"write_path"` selects how swaps reach Yahoo. **`browser`** (default) is the original Playwright Swap-Mode path — needs the seeded cookie `profile/`, the pinned DOM contract, and benefits from a residential IP. **`api`** performs the whole READ→WRITE→VERIFY cycle over the Yahoo Fantasy Sports API (`yahoo_api.py`, OAuth2 `fspt-w`): no browser launch at all, no DOM, no cookies, no IP sensitivity — one authenticated PUT per swap, verified by re-reading the roster. The DECIDE stage, guardrails, `DRY_RUN`/`PAUSED` gates, statuses, and exit codes are identical on both paths; on the api path `LOGIN_REQUIRED` (exit 2) means the OAuth refresh died — re-run `scripts/yahoo_auth.py` (not `seed_login.py`). Prerequisite for `api`: gates G0 in `docs/API_CONNECTOR_UPGRADE_PLAN.json` (Yahoo developer app + supervised write proof via `scripts/yahoo_write_proof.py`). Evidence per run: `logs/api_roster_before/after_*.json` replace the PNG screenshots.
 
 ### 1.5b The research layer (Claude Code Routines)
 

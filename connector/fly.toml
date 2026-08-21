@@ -1,0 +1,21 @@
+# Fly.io deployment (gate G2 — deploy only after the human picks the host).
+#   fly launch --no-deploy         # once, from the repo ROOT (build ctx = .)
+#   fly secrets set CONNECTOR_TOKEN=<long random string>
+#   fly secrets set YAHOO_SECRETS_B64=$(base64 -i ~/.ffl-secrets/yahoo.json)
+#   fly deploy --dockerfile connector/Dockerfile
+# The release command below materializes the secrets file from the b64 secret.
+app = "ffl-yahoo-connector"
+primary_region = "mia"
+
+[build]
+  dockerfile = "connector/Dockerfile"
+
+[deploy]
+  release_command = "sh -c 'mkdir -p /secrets && echo $YAHOO_SECRETS_B64 | base64 -d > /secrets/yahoo.json'"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
